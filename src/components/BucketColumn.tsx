@@ -101,6 +101,7 @@ export function BucketColumn({
     onRenameBucket,
     onDeleteBucket,
 }: BucketColumnProps) {
+    const [isEntering, setIsEntering] = useState(true);
     const [isOver, setIsOver] = useState(false);
     const [activeDropIndex, setActiveDropIndex] = useState<number | null>(null);
     const [settledDropIndex, setSettledDropIndex] = useState<number | null>(null);
@@ -263,7 +264,7 @@ export function BucketColumn({
             ref={(element) => {
                 if (bucket) registerColumnRef?.(bucket.id, element);
             }}
-            className={`bucket-column bucket-accent-${accentIndex} drag-source-${dragSourceAccentIndex} column-stagger-${staggerIndex}${isOver ? ' drag-over' : ''}${isBucketDragSource ? ' bucket-drag-source' : ''}${isWarpHighlight ? ' warp-highlight' : ''}${nudgeFromLeftGap ? ' bucket-drop-nudge-left' : ''}${nudgeFromRightGap ? ' bucket-drop-nudge-right' : ''}${isBucketDropSettled ? ' bucket-drop-settled' : ''}${bucketDropSettleFrom === 'left' ? ' bucket-drop-settled-from-left' : ''}${bucketDropSettleFrom === 'right' ? ' bucket-drop-settled-from-right' : ''}`}
+            className={`bucket-column bucket-accent-${accentIndex} drag-source-${dragSourceAccentIndex} column-stagger-${staggerIndex}${isEntering ? ' bucket-entering' : ''}${isOver ? ' drag-over' : ''}${isBucketDragSource ? ' bucket-drag-source' : ''}${isWarpHighlight ? ' warp-highlight' : ''}${nudgeFromLeftGap ? ' bucket-drop-nudge-left' : ''}${nudgeFromRightGap ? ' bucket-drop-nudge-right' : ''}${isBucketDropSettled ? ' bucket-drop-settled' : ''}${bucketDropSettleFrom === 'left' ? ' bucket-drop-settled-from-left' : ''}${bucketDropSettleFrom === 'right' ? ' bucket-drop-settled-from-right' : ''}`}
             onDragOver={(event) => {
                 if (isBucketDragActive) {
                     const targetIndex = getBucketDropTargetIndex(event);
@@ -295,6 +296,10 @@ export function BucketColumn({
                 drop(event, tasks.length);
             }}
             onAnimationEnd={(event) => {
+                if (event.animationName === 'reveal-column-opacity') {
+                    setIsEntering(false);
+                    return;
+                }
                 if (!isBucketDropSettled) return;
                 if (event.animationName !== 'bucket-relocate-settle') return;
                 onBucketDropSettleEnd?.();

@@ -32,7 +32,9 @@ const makeTask = (): PlannerTaskV2 => ({
 
 interface RenderBucketOptions {
     bucketDropIndex?: number;
+    bucketDropSettleFrom?: 'left' | 'right' | null;
     isBucketDragActive?: boolean;
+    isBucketDropSettled?: boolean;
     tasks?: PlannerTaskV2[];
     withAllHeaderActions?: boolean;
     canPasteIntoBucket?: boolean;
@@ -50,25 +52,28 @@ const renderBucket = (
     const onBucketDragEnd = vi.fn();
     const onBucketDragHover = vi.fn();
     const onBucketDrop = vi.fn();
+    const onBucketDropSettleEnd = vi.fn();
     const onCopyBucketTasks = vi.fn();
     const onPasteIntoBucket = vi.fn();
     const onMoveBucketByOffset = vi.fn();
     const onToggleBucketPin = vi.fn();
     const onRenameBucket = vi.fn();
     const onDeleteBucket = vi.fn();
-    const tasks = options.tasks ?? [];
-    const result = render(
+    let currentOptions = options;
+    const renderColumn = (nextOptions: RenderBucketOptions) => (
         <BucketColumn
             columnIndex={11}
             bucket={bucket}
-            tasks={tasks}
+            tasks={nextOptions.tasks ?? []}
             draggedTaskId={null}
-            isBucketDragActive={options.isBucketDragActive}
+            isBucketDragActive={nextOptions.isBucketDragActive}
             draggedAccentIndex={null}
             highlightedTaskId={null}
             isWarpHighlight={isWarpHighlight}
             isBucketDragSource={isBucketDragSource}
-            bucketDropIndex={options.bucketDropIndex}
+            isBucketDropSettled={nextOptions.isBucketDropSettled}
+            bucketDropSettleFrom={nextOptions.bucketDropSettleFrom}
+            bucketDropIndex={nextOptions.bucketDropIndex}
             onQuickAddTask={vi.fn()}
             onEditTask={vi.fn()}
             onDeleteTask={vi.fn()}
@@ -81,23 +86,30 @@ const renderBucket = (
             onBucketDragEnd={onBucketDragEnd}
             onBucketDragHover={onBucketDragHover}
             onBucketDrop={onBucketDrop}
-            onCopyBucketTasks={options.withAllHeaderActions ? onCopyBucketTasks : undefined}
-            onPasteIntoBucket={options.withAllHeaderActions ? onPasteIntoBucket : undefined}
-            canPasteIntoBucket={options.canPasteIntoBucket}
-            onMoveBucketByOffset={options.withAllHeaderActions ? onMoveBucketByOffset : undefined}
-            canMoveBucketLeft={options.canMoveBucketLeft}
-            canMoveBucketRight={options.canMoveBucketRight}
-            onToggleBucketPin={options.withAllHeaderActions ? onToggleBucketPin : undefined}
-            onRenameBucket={options.withAllHeaderActions ? onRenameBucket : undefined}
-            onDeleteBucket={options.withAllHeaderActions ? onDeleteBucket : undefined}
+            onBucketDropSettleEnd={onBucketDropSettleEnd}
+            onCopyBucketTasks={nextOptions.withAllHeaderActions ? onCopyBucketTasks : undefined}
+            onPasteIntoBucket={nextOptions.withAllHeaderActions ? onPasteIntoBucket : undefined}
+            canPasteIntoBucket={nextOptions.canPasteIntoBucket}
+            onMoveBucketByOffset={nextOptions.withAllHeaderActions ? onMoveBucketByOffset : undefined}
+            canMoveBucketLeft={nextOptions.canMoveBucketLeft}
+            canMoveBucketRight={nextOptions.canMoveBucketRight}
+            onToggleBucketPin={nextOptions.withAllHeaderActions ? onToggleBucketPin : undefined}
+            onRenameBucket={nextOptions.withAllHeaderActions ? onRenameBucket : undefined}
+            onDeleteBucket={nextOptions.withAllHeaderActions ? onDeleteBucket : undefined}
         />
     );
+    const result = render(renderColumn(currentOptions));
     return {
         ...result,
+        rerenderBucket: (nextOptions: RenderBucketOptions) => {
+            currentOptions = { ...currentOptions, ...nextOptions };
+            result.rerender(renderColumn(currentOptions));
+        },
         onBucketDragStart,
         onBucketDragEnd,
         onBucketDragHover,
         onBucketDrop,
+        onBucketDropSettleEnd,
         onCopyBucketTasks,
         onPasteIntoBucket,
         onMoveBucketByOffset,
@@ -126,6 +138,78 @@ const fireBucketDragEvent = (
     fireEvent(target, event);
     return event;
 };
+
+const fireColumnAnimationEnd = (target: HTMLElement, animationName: string) => {
+    // JSDOM omits AnimationEvent, so React registers its vendor-prefixed fallback.
+    const event = new Event('webkitAnimationEnd', { bubbles: true });
+    Object.defineProperty(event, 'animationName', { value: animationName });
+    fireEvent(target, event);
+};
+
+describe('BucketColumn entrance and settle animations', () => {
+    it('starts with one-time entrance state and clears it at reveal completion', () => {
+        const { container, onBucketDropSettleEnd } = renderBucket(makeBucket());
+        const column = container.querySelector('.bucket-column') as HTMLElement;
+
+        expect(column).toHaveClass('bucket-entering');
+        fireColumnAnimationEnd(column, 'reveal-column-opacity');
+
+        expect(column).not.toHaveClass('bucket-entering');
+        expect(onBucketDropSettleEnd).not.toHaveBeenCalled();
+    });
+
+    it('does not restore or accumulate entrance state across repeated settle cycles', () => {
+        const { container, rerenderBucket } = renderBucket(makeBucket());
+        const column = container.querySelector('.bucket-column') as HTMLElement;
+        fireColumnAnimationEnd(column, 'reveal-column-opacity');
+
+        rerenderBucket({
+            isBucketDropSettled: true,
+            bucketDropSettleFrom: 'left',
+        });
+        expect(container.querySelector('.bucket-column')).toBe(column);
+        expect(column).toHaveClass('bucket-drop-settled', 'bucket-drop-settled-from-left');
+        expect(column).not.toHaveClass('bucket-entering');
+
+        rerenderBucket({
+            isBucketDropSettled: false,
+            bucketDropSettleFrom: null,
+        });
+        expect(column).not.toHaveClass('bucket-drop-settled', 'bucket-entering');
+
+        rerenderBucket({
+            isBucketDropSettled: true,
+            bucketDropSettleFrom: 'right',
+        });
+        expect(column).toHaveClass('bucket-drop-settled', 'bucket-drop-settled-from-right');
+        expect(column.className.match(/\bbucket-entering\b/g) ?? []).toHaveLength(0);
+
+        rerenderBucket({
+            isBucketDropSettled: false,
+            bucketDropSettleFrom: null,
+        });
+        expect(column).not.toHaveClass('bucket-drop-settled', 'bucket-entering');
+    });
+
+    it('runs settle cleanup once only for the column relocation animation', () => {
+        const {
+            container,
+            onBucketDropSettleEnd,
+        } = renderBucket(makeBucket(), false, false, {
+            isBucketDropSettled: true,
+            bucketDropSettleFrom: 'left',
+        });
+        const column = container.querySelector('.bucket-column') as HTMLElement;
+
+        fireColumnAnimationEnd(column, 'reveal-column-opacity');
+        fireColumnAnimationEnd(column, 'bucket-settle-glow-overlay');
+        fireColumnAnimationEnd(column, 'bucket-orb-flow');
+        expect(onBucketDropSettleEnd).not.toHaveBeenCalled();
+
+        fireColumnAnimationEnd(column, 'bucket-relocate-settle');
+        expect(onBucketDropSettleEnd).toHaveBeenCalledOnce();
+    });
+});
 
 describe('BucketColumn drag handle', () => {
     it.each([false, true])('renders an enabled draggable handle when pinned is %s', (pinned) => {

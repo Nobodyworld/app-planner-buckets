@@ -99,3 +99,30 @@ describe('bucket header containment contract', () => {
         expect(narrowBucket).toMatch(/min-width:\s*min\(86vw,\s*340px\);/);
     });
 });
+
+describe('bucket entrance animation contract', () => {
+    it('keeps the base column rule free of entrance animation ownership', () => {
+        const baseColumnEffects = cssRule('.bucket-column', 1);
+
+        expect(baseColumnEffects).not.toMatch(/\banimation\s*:/);
+        expect(baseColumnEffects).not.toMatch(/\banimation-delay\s*:/);
+        expect(baseColumnEffects).not.toContain('reveal-column-opacity');
+    });
+
+    it('assigns reveal and stagger timing only to the explicit entrance class', () => {
+        const entering = cssRule('.bucket-column.bucket-entering');
+
+        expect(entering).toMatch(
+            /animation:\s*reveal-column-opacity var\(--anim-column-reveal\)\s*var\(--ease-standard\) both;/,
+        );
+        expect(entering).toMatch(
+            /animation-delay:\s*calc\(var\(--column-index\) \* var\(--stagger-column-step\)\);/,
+        );
+    });
+
+    it('retains the global reduced-motion duration and iteration limits', () => {
+        expect(stylesheet).toMatch(
+            /@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?animation-duration:\s*1ms !important;[\s\S]*?animation-iteration-count:\s*1 !important;/,
+        );
+    });
+});
