@@ -421,6 +421,7 @@ export function PlannerSidepanel({
                     showExportScopeMenu={showExportScopeMenu}
                     exportScope={exportScope}
                     exportScopeOptionCount={exportScopeOptionCount}
+                    activeProjectName={activeProjectName}
                     activeBuckets={activeBuckets}
                     openAdvancedSectionsInTests={openAdvancedSectionsInTests}
                     onConfirmUploadData={onConfirmUploadData}

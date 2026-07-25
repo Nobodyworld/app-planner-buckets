@@ -305,7 +305,7 @@ describe('BucketColumn header actions', () => {
         const header = column.querySelector('.bucket-header') as HTMLElement;
         const actions = header.querySelector('.bucket-actions') as HTMLElement;
         const actionQueries = [
-            ['button', `Copy all tasks in ${bucket.name}`],
+            ['button', `Copy ${bucket.name} as JSON`],
             ['button', `Paste tasks into ${bucket.name}`],
             ['img', 'Drag to move bucket'],
             ['button', 'Move bucket left'],
@@ -400,17 +400,15 @@ describe('BucketColumn header actions', () => {
             label: 'empty',
             tasks: [] as PlannerTaskV2[],
             countLabel: '0 tasks',
-            copyLabel: 'No tasks to copy from New bucket',
-            copyDisabled: true,
+            copyLabel: 'Copy New bucket as JSON',
         },
         {
             label: 'populated',
             tasks: [makeTask()],
             countLabel: '1 task',
-            copyLabel: 'Copy all tasks in New bucket',
-            copyDisabled: false,
+            copyLabel: 'Copy New bucket as JSON',
         },
-    ])('keeps all actions in the header for an $label bucket', ({ tasks, countLabel, copyLabel, copyDisabled }) => {
+    ])('keeps all actions in the header for an $label bucket', ({ tasks, countLabel, copyLabel }) => {
         const { container } = renderBucket(makeBucket(), false, false, {
             tasks,
             withAllHeaderActions: true,
@@ -425,7 +423,7 @@ describe('BucketColumn header actions', () => {
 
         expect(titleBlock).toHaveTextContent(countLabel);
         expect(actions.children).toHaveLength(8);
-        expect(copyButton).toHaveProperty('disabled', copyDisabled);
+        expect(copyButton).toBeEnabled();
     });
 
     it.each([

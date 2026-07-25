@@ -46,7 +46,6 @@ interface BucketColumnProps {
     canMoveBucketLeft?: boolean;
     canMoveBucketRight?: boolean;
     onBucketDropSettleEnd?: () => void;
-    copyTaskCount?: number;
     onToggleBucketPin?: (bucket: Bucket) => void;
     onRenameBucket?: (bucket: Bucket) => void;
     onDeleteBucket?: (bucket: Bucket) => void;
@@ -102,7 +101,6 @@ export function BucketColumn({
     canMoveBucketLeft = false,
     canMoveBucketRight = false,
     onBucketDropSettleEnd,
-    copyTaskCount = tasks.length,
     onToggleBucketPin,
     onRenameBucket,
     onDeleteBucket,
@@ -331,9 +329,8 @@ export function BucketColumn({
                                 type="button"
                                 className="icon-button copy-button"
                                 onClick={() => onCopyBucketTasks(bucketId)}
-                                disabled={copyTaskCount === 0}
-                                title={copyTaskCount === 0 ? `No tasks to copy from ${bucketLabel}` : `Copy all tasks in ${bucketLabel}`}
-                                aria-label={copyTaskCount === 0 ? `No tasks to copy from ${bucketLabel}` : `Copy all tasks in ${bucketLabel}`}
+                                title={`Copy ${bucketLabel} as JSON`}
+                                aria-label={`Copy ${bucketLabel} as JSON`}
                             >
                                 ⧉
                             </button>

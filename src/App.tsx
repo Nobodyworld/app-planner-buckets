@@ -29,13 +29,22 @@ import { savePlannerDataV2ToLocalStorage, loadPlannerDataV2FromLocalStorage } fr
 import { plannerReducerV2, type PlannerActionV2 } from './state/plannerReducerV2';
 import {
   copyTextToClipboard,
-  formatBucketForOrderedCopy,
   formatTaskChecklistLabel,
   formatTaskForOrderedCopy,
   formatTaskForSingleCopy,
 } from './services/plannerClipboard';
 import { coercePlannerDataToV2, mergeUploadedPlannerDataV2 } from './services/plannerImport';
-import { isValidPlannerDataV2 } from './types/validators';
+import {
+  buildStructuredBucketCopyDocument,
+  formatProjectMarkdownForCopy,
+  type StructuredBucketCopyTask,
+} from './services/plannerExchange';
+import {
+  buildPlannerExportFilename,
+  buildProjectExchangeEnvelope,
+  buildRawPlannerDataExport,
+  type PlannerExportFilenameScope,
+} from './services/plannerExport';
 
 const accentIndexFromBucket = (bucketId: string | null) => {
   if (!bucketId) return 0;
@@ -64,6 +73,7 @@ const ensureScrollableTargetInView = (
 };
 
 const UPLOAD_HALO_DURATION_MS = 120000;
+const EXPORT_NOTICE_DURATION_MS = 10000;
 const DROP_SETTLE_DURATION_MS = 1500;
 const BOARD_EDGE_AUTOSCROLL_ZONE_PX = 96;
 const BOARD_EDGE_AUTOSCROLL_MAX_SPEED_PX = 24;
@@ -292,7 +302,7 @@ export default function App() {
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [draggedTaskIds, setDraggedTaskIds] = useState<string[]>([]);
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(() => new Set());
-  const [taskClipboard, setTaskClipboard] = useState<Array<Pick<PlannerTask, 'title' | 'description'>>>([]);
+  const [taskClipboard, setTaskClipboard] = useState<StructuredBucketCopyTask[]>([]);
   const [activePasteBucketId, setActivePasteBucketId] = useState<string | null>(null);
   const [draggedBucketId, setDraggedBucketId] = useState<string | null>(null);
   const [activeBucketDropIndex, setActiveBucketDropIndex] = useState<number | null>(null);
@@ -445,7 +455,7 @@ export default function App() {
 
     const timeoutId = window.setTimeout(() => {
       setExportNotice(null);
-    }, 5000);
+    }, EXPORT_NOTICE_DURATION_MS);
 
     return () => window.clearTimeout(timeoutId);
   }, [exportNotice]);
@@ -1144,64 +1154,56 @@ export default function App() {
   const exportData = () => {
     if (!activeProject) return;
     setShowExportScopeMenu(false);
-    let dataToExport: PlannerData = state;
-    if (exportScope === 'unassigned') {
-      dataToExport = {
-        ...state,
-        projects: [activeProject],
-        buckets: [],
-        tasks: activeTasks.filter((task) => task.bucketId === null),
-        templates: [],
-        templateDefinitions: [],
-      };
-    } else if (exportScope.startsWith('bucket:')) {
-      const bucketId = exportScope.slice('bucket:'.length);
-      const bucket = activeBuckets.find((item) => item.id === bucketId) ?? null;
+    const exportedAt = new Date();
+    let payload: PlannerData | ReturnType<typeof buildProjectExchangeEnvelope>;
+    let filenameScope: PlannerExportFilenameScope;
 
-      // Collect template/definition for template-derived buckets
-      const templates: BucketTemplate[] = [];
-      const templateDefinitions: BucketTemplateDefinition[] = [];
-
-      if (bucket && bucket.templateDefinitionId !== null) {
-        const definition = state.templateDefinitions.find((d) => d.id === bucket.templateDefinitionId);
-        if (definition) {
-          templateDefinitions.push(definition);
-          const template = state.templates.find((t) => t.id === definition.templateId);
-          if (template) {
-            templates.push(template);
-          }
+    try {
+      if (exportScope === 'project') {
+        payload = buildProjectExchangeEnvelope(state, effectiveActiveProjectId, exportedAt);
+        filenameScope = { kind: 'project', name: activeProject.name };
+      } else if (exportScope === 'unassigned') {
+        payload = buildRawPlannerDataExport(state, {
+          kind: 'unassigned',
+          projectId: effectiveActiveProjectId,
+        });
+        filenameScope = { kind: 'unassigned' };
+      } else if (exportScope.startsWith('bucket:')) {
+        const bucketId = exportScope.slice('bucket:'.length);
+        const bucket = activeBuckets.find((item) => item.id === bucketId);
+        if (!bucket) {
+          throw new Error('The selected export bucket no longer exists.');
         }
+        payload = buildRawPlannerDataExport(state, {
+          kind: 'bucket',
+          projectId: effectiveActiveProjectId,
+          bucketId,
+        });
+        filenameScope = { kind: 'bucket', name: bucket.name };
+      } else {
+        payload = buildRawPlannerDataExport(state, { kind: 'all' });
+        filenameScope = { kind: 'all' };
       }
-
-      dataToExport = {
-        ...state,
-        projects: [activeProject],
-        buckets: bucket ? [bucket] : [],
-        tasks: activeTasks.filter((task) => task.bucketId === bucketId),
-        templates,
-        templateDefinitions,
-      };
-    }
-
-    if (!isValidPlannerDataV2(dataToExport)) {
+    } catch {
       setDataActionMessage('Current planner data could not be validated for export.');
       return;
     }
 
-    const blob = new Blob([JSON.stringify(dataToExport, null, 2)], {
+    const filename = buildPlannerExportFilename(filenameScope, exportedAt);
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: 'application/json',
     });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `bsp-planner-${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = filename;
     link.style.display = 'none';
     document.body.appendChild(link);
 
     try {
       link.click();
       setDataActionMessage(null);
-      setExportNotice(`Export started — check your default Downloads folder for ${link.download}.`);
+      setExportNotice(`Export started — check your default Downloads folder for ${filename}.`);
     } catch {
       setExportNotice(null);
       link.remove();
@@ -1328,7 +1330,7 @@ export default function App() {
   const pendingUploadSummary = pendingUploadData
     ? `${pendingUploadData.tasks.length} task(s) and ${pendingUploadData.buckets.length} bucket(s)`
     : '';
-  const exportScopeOptionCount = 2 + activeBuckets.length;
+  const exportScopeOptionCount = 3 + activeBuckets.length;
 
   useEffect(() => {
     if (exportScope.startsWith('bucket:')) {
@@ -1379,44 +1381,70 @@ export default function App() {
       tasks.map((task) => ({
         title: task.title,
         description: task.description,
+        completed: task.completed,
+        pinned: task.pinned,
       })),
     );
+  };
+
+  const copyTextWithStatus = (
+    text: string,
+    successMessage: string,
+    failureMessage: string,
+  ) => {
+    void (async () => {
+      try {
+        await copyTextToClipboard(text);
+        showTemporaryStatus(successMessage);
+      } catch {
+        showTemporaryStatus(failureMessage);
+      }
+    })();
   };
 
   const copyTaskToClipboard = (task: PlannerTask, bucketName: string) => {
     setClipboardFromTasks([task]);
     setActivePasteBucketId(task.bucketId);
-
-    void (async () => {
-      try {
-        await copyTextToClipboard(formatTaskForSingleCopy(task, bucketName));
-        showTemporaryStatus(`Copied "${task.title}"`);
-      } catch {
-        showTemporaryStatus('Could not copy task');
-      }
-    })();
+    copyTextWithStatus(
+      formatTaskForSingleCopy(task, bucketName),
+      `Copied "${task.title}"`,
+      'Could not copy task',
+    );
   };
 
   const copyBucketTasksToClipboard = (bucketId: string | null) => {
-    const bucketName = bucketId ? bucketNameById.get(bucketId) ?? 'Unassigned' : 'Unassigned';
-    const tasks = tasksByBucket.get(bucketId) ?? [];
-
-    if (tasks.length === 0) {
-      showTemporaryStatus(`No tasks to copy from ${bucketName}`);
+    let copyDocument: ReturnType<typeof buildStructuredBucketCopyDocument>;
+    try {
+      copyDocument = buildStructuredBucketCopyDocument(state, {
+        projectId: effectiveActiveProjectId,
+        bucketId,
+      });
+    } catch {
+      showTemporaryStatus('Could not copy bucket');
       return;
     }
 
-    setClipboardFromTasks(tasks);
+    setTaskClipboard(copyDocument.tasks);
     setActivePasteBucketId(bucketId);
+    copyTextWithStatus(
+      JSON.stringify(copyDocument, null, 2),
+      `Copied ${copyDocument.bucket.name} as JSON with ${copyDocument.tasks.length} task${copyDocument.tasks.length === 1 ? '' : 's'}`,
+      `Could not copy ${copyDocument.bucket.name}`,
+    );
+  };
 
-    void (async () => {
-      try {
-        await copyTextToClipboard(formatBucketForOrderedCopy(bucketName, tasks));
-        showTemporaryStatus(`Copied ${bucketName} and ${tasks.length} task${tasks.length === 1 ? '' : 's'}`);
-      } catch {
-        showTemporaryStatus(`Could not copy ${bucketName}`);
-      }
-    })();
+  const copyActiveProjectToClipboard = () => {
+    setTaskClipboard([]);
+    setActivePasteBucketId(null);
+    try {
+      copyTextWithStatus(
+        formatProjectMarkdownForCopy(state, effectiveActiveProjectId),
+        `Copied project "${activeProject.name}"`,
+        `Could not copy project "${activeProject.name}"`,
+      );
+    } catch {
+      showTemporaryStatus(`Could not copy project "${activeProject.name}"`);
+    }
   };
 
   const copySelectedTasks = () => {
@@ -1428,14 +1456,11 @@ export default function App() {
 
     setClipboardFromTasks(tasks);
 
-    void (async () => {
-      try {
-        await copyTextToClipboard(tasks.map(formatTaskForOrderedCopy).join('\n'));
-        showTemporaryStatus(`Copied ${tasks.length} selected task${tasks.length === 1 ? '' : 's'}`);
-      } catch {
-        showTemporaryStatus('Could not copy selected tasks');
-      }
-    })();
+    copyTextWithStatus(
+      tasks.map(formatTaskForOrderedCopy).join('\n'),
+      `Copied ${tasks.length} selected task${tasks.length === 1 ? '' : 's'}`,
+      'Could not copy selected tasks',
+    );
   };
 
   const pasteTasksIntoBucket = (bucketId: string | null) => {
@@ -1922,6 +1947,13 @@ export default function App() {
               </button>
             </div>
             <div className="board-actions" role="group" aria-label="Board actions">
+              <button
+                type="button"
+                className="secondary-button project-copy-button"
+                onClick={copyActiveProjectToClipboard}
+              >
+                Copy project
+              </button>
               <SelectionActions
                 selectedCount={getSelectedTaskCount(selectedTaskIds)}
                 onCopySelected={copySelectedTasks}
@@ -2095,7 +2127,6 @@ export default function App() {
                 draggedAccentIndex={draggedTaskAccentIndex}
                 highlightedTaskId={highlightedTaskId}
                 uploadedTaskIdSet={uploadedTaskIdSet}
-                copyTaskCount={tasksByBucket.get(null)?.length ?? 0}
                 isWarpHighlight={highlightedTaskBucketId === null}
                 onCopyBucketTasks={copyBucketTasksToClipboard}
                 onCopyTask={copyTaskToClipboard}
@@ -2157,7 +2188,6 @@ export default function App() {
                     draggedAccentIndex={draggedTaskAccentIndex}
                     highlightedTaskId={highlightedTaskId}
                     uploadedTaskIdSet={uploadedTaskIdSet}
-                    copyTaskCount={tasksByBucket.get(bucket.id)?.length ?? 0}
                     registerColumnRef={registerBucketElement}
                     isWarpHighlight={highlightedBucketId === bucket.id || highlightedTaskBucketId === bucket.id}
                     onCopyBucketTasks={copyBucketTasksToClipboard}

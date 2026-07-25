@@ -11,6 +11,10 @@ import type { PlannerData } from './types';
 import type { PlannerDataV2, PlannerTaskV2 } from './types/v2';
 import { PLANNER_DATA_V2_VERSION } from './types/v2';
 import { isValidPlannerDataV2 } from './types/validators';
+import {
+    isValidProjectExchangeEnvelope,
+    type ProjectExchangeEnvelope,
+} from './services/plannerExport';
 
 const V1_STORAGE_KEY = 'planner-buckets:data:v1';
 const V2_STORAGE_KEY = 'planner-buckets:data:v2';
@@ -745,6 +749,39 @@ describe('App integration', () => {
         expect(dataToggle).toHaveFocus();
     });
 
+    it('orders Data actions and exposes project scope with accessible selected context', () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        render(<App />);
+        expandSidebarSection('Data');
+
+        const exportButton = screen.getByRole('button', { name: 'Export JSON' });
+        const scopeButton = screen.getByRole('button', { name: 'Choose export scope' });
+        const uploadButton = screen.getByRole('button', { name: 'Upload JSON to merge' });
+        const restoreButton = screen.getByRole('button', { name: 'Restore from JSON backup' });
+
+        expect(exportButton.compareDocumentPosition(scopeButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(scopeButton.compareDocumentPosition(uploadButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(uploadButton.compareDocumentPosition(restoreButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(screen.getByRole('group', { name: 'Project import and upload' })).toContainElement(uploadButton);
+        expect(screen.getByText(/Selected export scope:/)).toHaveTextContent('Selected export scope: All data');
+
+        fireEvent.click(scopeButton);
+        const scopeMenu = screen.getByLabelText('Export scope options');
+        expect(within(scopeMenu).getAllByRole('button').map((button) => button.textContent)).toEqual([
+            'All data',
+            'Project: Beta',
+            'Unassigned tasks',
+            'Bucket: Beta Bucket',
+        ]);
+        const projectScope = within(scopeMenu).getByRole('button', { name: 'Project: Beta' });
+        expect(projectScope).toHaveAttribute('aria-pressed', 'false');
+        fireEvent.click(projectScope);
+        expect(screen.getByText(/Selected export scope:/)).toHaveTextContent(
+            'Selected export scope: Project: Beta',
+        );
+    });
+
     it('does not auto-open the sidepanel when auto-open lock is enabled', () => {
         vi.useFakeTimers();
         const { container } = render(<App />);
@@ -834,7 +871,7 @@ describe('App integration', () => {
         expect(screen.queryByText(/Copied "Write launch summary"/)).not.toBeInTheDocument();
     });
 
-    it('copies a bucket name with its ordered task checklist', async () => {
+    it('copies a bucket as exact structured JSON', async () => {
         const writeText = vi.fn().mockResolvedValue(undefined);
         Object.defineProperty(navigator, 'clipboard', {
             value: { writeText },
@@ -843,19 +880,135 @@ describe('App integration', () => {
 
         render(<App />);
 
-        fireEvent.click(screen.getByRole('button', { name: 'Copy all tasks in To Do' }));
+        fireEvent.change(screen.getByLabelText('Search tasks'), {
+            target: { value: 'not present in any task' },
+        });
+        expect(screen.queryByRole('button', { name: 'Write launch summary' })).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
 
         await waitFor(() => {
             expect(writeText).toHaveBeenCalledTimes(1);
         });
 
-        expect(writeText).toHaveBeenCalledWith('Bucket: To Do\n1. [ ] Write launch summary\n   Note: Include blockers');
+        expect(writeText).toHaveBeenCalledWith(JSON.stringify({
+            bucket: {
+                name: 'To Do',
+                pinned: true,
+            },
+            tasks: [
+                {
+                    title: 'Write launch summary',
+                    description: 'Include blockers',
+                    completed: false,
+                    pinned: false,
+                },
+            ],
+        }, null, 2));
+    });
+
+    it('copies an empty Unassigned document and replaces the latest internal paste buffer', async () => {
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        expect(screen.getByRole('button', { name: 'Paste tasks into Unassigned' })).toBeEnabled();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy Unassigned as JSON' }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+
+        expect(writeText).toHaveBeenLastCalledWith(JSON.stringify({
+            bucket: {
+                name: 'Unassigned',
+                pinned: false,
+            },
+            tasks: [],
+        }, null, 2));
+        screen.getAllByRole('button', { name: 'Copy tasks first to paste' }).forEach((button) => {
+            expect(button).toBeDisabled();
+        });
+    });
+
+    it('copies the full active project as Markdown, clears task paste, and preserves selection', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        fireEvent.click(screen.getByRole('button', { name: 'Copy Beta Bucket as JSON' }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Paste tasks into Unassigned' })).toBeEnabled();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy project' }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+
+        expect(writeText).toHaveBeenLastCalledWith(
+            '# Beta\n'
+            + '\n'
+            + '## Bucket: Beta Bucket\n'
+            + '\n'
+            + '1. [ ] Beta task\n'
+            + '2. [x] Completed beta task\n'
+            + '\n'
+            + '## Bucket: Second Bucket\n'
+            + '\n'
+            + '1. [ ] Second bucket task\n'
+            + '\n'
+            + '## Unassigned\n'
+            + '\n'
+            + '1. [ ] Beta unassigned',
+        );
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Deselect "Beta task" for bulk actions',
+        })).toBeChecked();
+        screen.getAllByRole('button', { name: 'Copy tasks first to paste' }).forEach((button) => {
+            expect(button).toBeDisabled();
+        });
+    });
+
+    it('reports project-copy failure without showing a false success', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const writeText = vi.fn().mockRejectedValue(new Error('clipboard unavailable'));
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+        Object.defineProperty(document, 'execCommand', {
+            value: vi.fn(() => false),
+            configurable: true,
+        });
+
+        const { container } = render(<App />);
+        fireEvent.click(screen.getByRole('button', { name: 'Copy project' }));
+
+        await waitFor(() => {
+            expect(container.querySelector('.search-status')).toHaveTextContent(
+                'Could not copy project "Beta"',
+            );
+        });
+        expect(container.querySelector('.search-status')).not.toHaveTextContent(
+            'Copied project "Beta"',
+        );
     });
 
     it('pastes copied tasks into another bucket', async () => {
         render(<App />);
 
-        fireEvent.click(screen.getByRole('button', { name: 'Copy all tasks in To Do' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
         fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
 
         await waitFor(() => {
@@ -972,11 +1125,28 @@ describe('App integration', () => {
         expect(writeText).toHaveBeenLastCalledWith('[ ] Beta task\nBucket: Beta Bucket');
         expect(screen.getByText('3 selected')).toBeInTheDocument();
 
-        fireEvent.click(screen.getByRole('button', { name: 'Copy all tasks in Beta Bucket' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Copy Beta Bucket as JSON' }));
         await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
-        expect(writeText).toHaveBeenLastCalledWith(
-            'Bucket: Beta Bucket\n1. [ ] Beta task\n2. [x] Completed beta task',
-        );
+        expect(writeText).toHaveBeenLastCalledWith(JSON.stringify({
+            bucket: {
+                name: 'Beta Bucket',
+                pinned: false,
+            },
+            tasks: [
+                {
+                    title: 'Beta task',
+                    description: '',
+                    completed: false,
+                    pinned: false,
+                },
+                {
+                    title: 'Completed beta task',
+                    description: '',
+                    completed: true,
+                    pinned: false,
+                },
+            ],
+        }, null, 2));
         expect(screen.getByText('3 selected')).toBeInTheDocument();
 
         fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
@@ -1856,10 +2026,13 @@ describe('App integration', () => {
         expect(screen.queryByRole('button', { name: 'Beta task' })).not.toBeInTheDocument();
     });
 
-    it('exports validated v2 JSON', async () => {
+    it('exports validated all-data v2 JSON with an exact, longer-lived dismissible filename notice', async () => {
         localStorage.clear();
         seedPlannerDataV2();
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-25T06:30:00.000Z'));
         let exportedBlob: Blob | null = null;
+        let downloadedFilename = '';
         const createObjectUrl = vi.fn((blob: Blob) => {
             exportedBlob = blob;
             return 'blob:planner-export';
@@ -1872,7 +2045,11 @@ describe('App integration', () => {
             value: vi.fn(),
             configurable: true,
         });
-        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+            this: HTMLAnchorElement,
+        ) {
+            downloadedFilename = this.download;
+        });
 
         render(<App />);
         expandSidebarSection('Data');
@@ -1880,13 +2057,88 @@ describe('App integration', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
 
         expect(screen.getByRole('status')).toHaveTextContent(
-            /Export started — check your default Downloads folder for bsp-planner-\d{4}-\d{2}-\d{2}\.json\./,
+            'Export started — check your default Downloads folder for bsp-planner-all-2026-07-25-063000.json.',
         );
+        expect(downloadedFilename).toBe('bsp-planner-all-2026-07-25-063000.json');
         expect(createObjectUrl).toHaveBeenCalledTimes(1);
         expect(exportedBlob).not.toBeNull();
         const exported = JSON.parse(await exportedBlob!.text()) as PlannerDataV2;
         expect(exported.version).toBe(2);
         expect(exported.projects).toHaveLength(2);
+
+        act(() => {
+            vi.advanceTimersByTime(5001);
+        });
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'bsp-planner-all-2026-07-25-063000.json',
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'Dismiss export notification' }));
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('exports the active project as a tagged, reference-closed envelope with one timestamped filename', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2ScopedExportFixture);
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-25T06:30:00.000Z'));
+        let exportedBlob: Blob | null = null;
+        let downloadedFilename = '';
+        Object.defineProperty(URL, 'createObjectURL', {
+            value: vi.fn((blob: Blob) => {
+                exportedBlob = blob;
+                return 'blob:planner-project-export';
+            }),
+            configurable: true,
+        });
+        Object.defineProperty(URL, 'revokeObjectURL', {
+            value: vi.fn(),
+            configurable: true,
+        });
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+            this: HTMLAnchorElement,
+        ) {
+            downloadedFilename = this.download;
+        });
+
+        render(<App />);
+        expandSidebarSection('Data');
+        fireEvent.click(screen.getByRole('button', { name: 'Choose export scope' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Project: Beta' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
+
+        expect(downloadedFilename).toBe('bsp-planner-project-beta-2026-07-25-063000.json');
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Export started — check your default Downloads folder for bsp-planner-project-beta-2026-07-25-063000.json.',
+        );
+        expect(exportedBlob).not.toBeNull();
+        const envelope = JSON.parse(await exportedBlob!.text()) as ProjectExchangeEnvelope;
+        expect(isValidProjectExchangeEnvelope(envelope)).toBe(true);
+        expect(envelope).toMatchObject({
+            format: 'bsp-planner-project',
+            envelopeVersion: 1,
+            sourceProject: {
+                id: 'project-b',
+                name: 'Beta',
+            },
+            exportedAt: '2026-07-25T06:30:00.000Z',
+        });
+        expect(envelope.data.projects.map((project) => project.id)).toEqual(['project-b']);
+        expect(envelope.data.buckets.map((bucket) => bucket.id)).toEqual([
+            'bucket-beta-ready-linked',
+            'bucket-beta-manual',
+        ]);
+        expect(envelope.data.tasks.map((task) => task.id)).toEqual([
+            'task-beta-ready-1',
+            'task-beta-ready-2',
+            'task-beta-manual',
+        ]);
+        expect(envelope.data.templateDefinitions.map((definition) => definition.id)).toEqual([
+            'definition-launch-ready',
+        ]);
+        expect(envelope.data.templates.map((template) => template.id)).toEqual(['template-launch']);
+        expect(JSON.stringify(envelope)).not.toContain('project-a');
+        expect(JSON.stringify(envelope)).not.toContain('project-c');
+        expect(JSON.stringify(envelope)).not.toContain('template-support');
     });
 
     it('restores valid v1 JSON by migrating it into v2 state', async () => {

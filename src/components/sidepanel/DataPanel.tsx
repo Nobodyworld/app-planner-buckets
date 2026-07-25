@@ -19,6 +19,7 @@ export interface DataPanelProps {
     showExportScopeMenu: boolean;
     exportScope: string;
     exportScopeOptionCount: number;
+    activeProjectName: string;
     activeBuckets: Bucket[];
     openAdvancedSectionsInTests: boolean;
     onConfirmUploadData: () => void;
@@ -52,6 +53,7 @@ export function DataPanel({
     showExportScopeMenu,
     exportScope,
     exportScopeOptionCount,
+    activeProjectName,
     activeBuckets,
     openAdvancedSectionsInTests,
     onConfirmUploadData,
@@ -67,6 +69,16 @@ export function DataPanel({
     onUploadFileChange,
 }: DataPanelProps) {
     const Wrapper = embedded ? 'div' : 'section';
+    const selectedBucket = exportScope.startsWith('bucket:')
+        ? activeBuckets.find((bucket) => bucket.id === exportScope.slice('bucket:'.length))
+        : null;
+    const selectedScopeLabel = exportScope === 'project'
+        ? `Project: ${activeProjectName}`
+        : exportScope === 'unassigned'
+            ? `Unassigned tasks in ${activeProjectName}`
+            : selectedBucket
+                ? `Bucket: ${selectedBucket.name}`
+                : 'All data';
 
     return (
         <Wrapper
@@ -86,10 +98,78 @@ export function DataPanel({
             <details className="panel-details" aria-label="Advanced data actions" open={openAdvancedSectionsInTests}>
                 <summary>Advanced data actions</summary>
 
-                <div className="data-action-row">
-                    <button type="button" className="secondary-button" onClick={() => uploadInputRef.current?.click()}>
-                        Upload JSON to merge
+                <div className="data-action-row export-action-row">
+                    <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={onToggleExportScopeMenu}
+                        aria-label="Choose export scope"
+                    >
+                        Choose export scope
                     </button>
+                </div>
+                <p className="data-scope-context" aria-live="polite">
+                    Selected export scope: <strong>{selectedScopeLabel}</strong>
+                </p>
+
+                {showExportScopeMenu && (
+                    <div
+                        ref={exportScopeMenuRef}
+                        className={`scope-menu interaction-scroll-target interaction-enter${exportScopeOptionCount > 5 ? ' scope-menu-scrollable' : ''}`}
+                        aria-label="Export scope options"
+                    >
+                        <button
+                            type="button"
+                            className={`scope-menu-item${exportScope === 'all' ? ' active' : ''}`}
+                            onClick={() => onSelectExportScope('all')}
+                            aria-pressed={exportScope === 'all'}
+                        >
+                            All data
+                        </button>
+                        <button
+                            type="button"
+                            className={`scope-menu-item${exportScope === 'project' ? ' active' : ''}`}
+                            onClick={() => onSelectExportScope('project')}
+                            aria-pressed={exportScope === 'project'}
+                        >
+                            Project: {activeProjectName}
+                        </button>
+                        <button
+                            type="button"
+                            className={`scope-menu-item${exportScope === 'unassigned' ? ' active' : ''}`}
+                            onClick={() => onSelectExportScope('unassigned')}
+                            aria-pressed={exportScope === 'unassigned'}
+                        >
+                            Unassigned tasks
+                        </button>
+                        {activeBuckets.map((bucket) => {
+                            const bucketScope = `bucket:${bucket.id}`;
+                            return (
+                                <button
+                                    key={bucket.id}
+                                    type="button"
+                                    className={`scope-menu-item${exportScope === bucketScope ? ' active' : ''}`}
+                                    onClick={() => onSelectExportScope(bucketScope)}
+                                    aria-pressed={exportScope === bucketScope}
+                                >
+                                    Bucket: {bucket.name}
+                                </button>
+                            );
+                        })}
+                    </div>
+                )}
+
+                <div
+                    className="data-action-group project-import-placeholder"
+                    role="group"
+                    aria-label="Project import and upload"
+                >
+                    <p className="data-action-label">Project import / upload</p>
+                    <div className="data-action-row">
+                        <button type="button" className="secondary-button" onClick={() => uploadInputRef.current?.click()}>
+                            Upload JSON to merge
+                        </button>
+                    </div>
                 </div>
 
                 {hasPendingUploadData && (
@@ -117,53 +197,6 @@ export function DataPanel({
                                 ✕
                             </button>
                         </div>
-                    </div>
-                )}
-
-                <div className="data-action-row export-action-row">
-                    <button
-                        type="button"
-                        className="secondary-button"
-                        onClick={onToggleExportScopeMenu}
-                        aria-label="Choose export scope"
-                    >
-                        Choose export scope
-                    </button>
-                </div>
-
-                {showExportScopeMenu && (
-                    <div
-                        ref={exportScopeMenuRef}
-                        className={`scope-menu interaction-scroll-target interaction-enter${exportScopeOptionCount > 5 ? ' scope-menu-scrollable' : ''}`}
-                        aria-label="Export scope options"
-                    >
-                        <button
-                            type="button"
-                            className={`scope-menu-item${exportScope === 'all' ? ' active' : ''}`}
-                            onClick={() => onSelectExportScope('all')}
-                        >
-                            All data
-                        </button>
-                        <button
-                            type="button"
-                            className={`scope-menu-item${exportScope === 'unassigned' ? ' active' : ''}`}
-                            onClick={() => onSelectExportScope('unassigned')}
-                        >
-                            Unassigned tasks
-                        </button>
-                        {activeBuckets.map((bucket) => {
-                            const bucketScope = `bucket:${bucket.id}`;
-                            return (
-                                <button
-                                    key={bucket.id}
-                                    type="button"
-                                    className={`scope-menu-item${exportScope === bucketScope ? ' active' : ''}`}
-                                    onClick={() => onSelectExportScope(bucketScope)}
-                                >
-                                    Bucket: {bucket.name}
-                                </button>
-                            );
-                        })}
                     </div>
                 )}
 
