@@ -15,6 +15,7 @@ import {
   saveBoardZoomPreference,
   stepBoardZoom,
 } from './services/boardZoom';
+import { resolveQuickAdd } from './services/quickAdd';
 import { savePlannerDataV2ToLocalStorage, loadPlannerDataV2FromLocalStorage } from './services/plannerPersistence';
 import { plannerReducerV2, type PlannerActionV2 } from './state/plannerReducerV2';
 import {
@@ -55,11 +56,10 @@ const ensureScrollableTargetInView = (
 
 const UPLOAD_HALO_DURATION_MS = 120000;
 const DROP_SETTLE_DURATION_MS = 1500;
-const QUICK_TASK_BUCKET_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _-]*$/;
 const BOARD_EDGE_AUTOSCROLL_ZONE_PX = 96;
 const BOARD_EDGE_AUTOSCROLL_MAX_SPEED_PX = 24;
 
-const normalizeBucketName = (name: string) => name.trim().toLowerCase();
+const normalizeQuickAddName = (name: string) => name.trim().toLocaleLowerCase();
 
 const now = (): string => new Date().toISOString();
 
@@ -223,11 +223,13 @@ const APP_ICON_TEXT = 'PB';
 export default function App() {
   const openAdvancedSectionsInTests = /jsdom/i.test(window.navigator.userAgent);
   const [initialLoadResult] = useState(() => loadPlannerDataV2FromLocalStorage());
+  const initialProjectId = selectInitialProjectId(initialLoadResult.data.projects);
+  const initialProjectName = initialLoadResult.data.projects.find((project) => project.id === initialProjectId)?.name ?? '';
   const { state, dispatch: dispatchPlanner, canUndo, canRedo, undo, redo } = usePlannerHistory<PlannerData, PlannerActionV2>(
     initialLoadResult.data,
     plannerReducerV2,
   );
-  const [activeProjectId, setActiveProjectId] = useState(() => selectInitialProjectId(initialLoadResult.data.projects));
+  const [activeProjectId, setActiveProjectId] = useState(initialProjectId);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(() => initialLoadResult.data.templates[0]?.id ?? null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [bucketName, setBucketName] = useState('');
@@ -249,10 +251,12 @@ export default function App() {
   const [highlightedTaskBucketId, setHighlightedTaskBucketId] = useState<string | null>(null);
   const [uploadedTaskIds, setUploadedTaskIds] = useState<string[]>([]);
   const [pendingTaskSurge, setPendingTaskSurge] = useState(false);
-  const [quickTaskOpen, setQuickTaskOpen] = useState(true);
   const [quickTaskTitle, setQuickTaskTitle] = useState('');
+  const [quickTaskProjectName, setQuickTaskProjectName] = useState(initialProjectName);
+  const [quickTaskProjectId, setQuickTaskProjectId] = useState<string | null>(initialProjectId || null);
   const [quickTaskBucketName, setQuickTaskBucketName] = useState('');
   const [quickTaskBucketId, setQuickTaskBucketId] = useState<string | null>(null);
+  const [quickTaskMessage, setQuickTaskMessage] = useState<string | null>(null);
   const [boardBucketAddOpen, setBoardBucketAddOpen] = useState(false);
   const [boardBucketNameDraft, setBoardBucketNameDraft] = useState('');
   const [hideRestoreUndoCard, setHideRestoreUndoCard] = useState(false);
@@ -292,6 +296,7 @@ export default function App() {
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const quickTaskInputRef = useRef<HTMLInputElement>(null);
   const quickTaskBucketInputRef = useRef<HTMLInputElement>(null);
+  const quickTaskProjectInputRef = useRef<HTMLInputElement>(null);
   const quickTaskShellRef = useRef<HTMLDivElement>(null);
   const boardBucketInputRef = useRef<HTMLInputElement>(null);
   const sidepanelRef = useRef<HTMLElement>(null);
@@ -364,6 +369,33 @@ export default function App() {
     () => state.buckets.filter((bucket) => bucket.projectId === effectiveActiveProjectId),
     [effectiveActiveProjectId, state.buckets],
   );
+  const quickTaskTargetProjectId = useMemo(() => {
+    if (
+      quickTaskProjectId
+      && state.projects.some((project) => project.id === quickTaskProjectId)
+    ) {
+      return quickTaskProjectId;
+    }
+
+    const normalizedProjectName = normalizeQuickAddName(quickTaskProjectName);
+    if (!normalizedProjectName) return effectiveActiveProjectId || null;
+
+    const matchingProjects = state.projects.filter(
+      (project) => normalizeQuickAddName(project.name) === normalizedProjectName,
+    );
+    return matchingProjects.length === 1 ? matchingProjects[0].id : null;
+  }, [
+    effectiveActiveProjectId,
+    quickTaskProjectId,
+    quickTaskProjectName,
+    state.projects,
+  ]);
+  const quickTaskProjectBuckets = useMemo(
+    () => quickTaskTargetProjectId
+      ? state.buckets.filter((bucket) => bucket.projectId === quickTaskTargetProjectId)
+      : [],
+    [quickTaskTargetProjectId, state.buckets],
+  );
   const activeTasks = useMemo(
     () => state.tasks.filter((task) => task.projectId === effectiveActiveProjectId),
     [effectiveActiveProjectId, state.tasks],
@@ -374,6 +406,17 @@ export default function App() {
     if (state.projects.some((project) => project.id === activeProjectId)) return;
     setActiveProjectId(selectInitialProjectId(state.projects));
   }, [activeProjectId, state.projects]);
+
+  useEffect(() => {
+    if (!quickTaskProjectId) return;
+    const selectedProject = state.projects.find((project) => project.id === quickTaskProjectId);
+    if (!selectedProject) {
+      setQuickTaskProjectId(null);
+      setQuickTaskBucketId(null);
+      return;
+    }
+    setQuickTaskProjectName(selectedProject.name);
+  }, [quickTaskProjectId, state.projects]);
 
   useEffect(() => {
     if (selectedTemplateId && state.templates.some((template) => template.id === selectedTemplateId)) return;
@@ -556,15 +599,33 @@ export default function App() {
     return map;
   }, [activeBuckets]);
 
-  const bucketIdByNormalizedName = useMemo(() => {
-    const map = new Map<string, string>();
-    activeBuckets.forEach((bucket) => map.set(normalizeBucketName(bucket.name), bucket.id));
-    return map;
-  }, [activeBuckets]);
+  const findUniqueQuickTaskBucketId = (projectId: string | null, name: string): string | null => {
+    if (!projectId || !name.trim()) return null;
+    const normalizedName = normalizeQuickAddName(name);
+    const matchingBuckets = state.buckets.filter((bucket) => (
+      bucket.projectId === projectId
+      && normalizeQuickAddName(bucket.name) === normalizedName
+    ));
+    return matchingBuckets.length === 1 ? matchingBuckets[0].id : null;
+  };
+
+  const setQuickTaskProjectTarget = (project: Project, clearBucket = false) => {
+    setQuickTaskProjectId(project.id);
+    setQuickTaskProjectName(project.name);
+    if (clearBucket) {
+      setQuickTaskBucketId(null);
+      setQuickTaskBucketName('');
+    } else {
+      setQuickTaskBucketId(findUniqueQuickTaskBucketId(project.id, quickTaskBucketName));
+    }
+    setQuickTaskMessage(null);
+  };
 
   const selectProject = (projectId: string) => {
-    if (!state.projects.some((project) => project.id === projectId)) return;
+    const project = state.projects.find((candidate) => candidate.id === projectId);
+    if (!project) return;
     setActiveProjectId(projectId);
+    setQuickTaskProjectTarget(project);
     setSelectedTaskIds([]);
     setSelectionAnchorTaskId(null);
     setActivePasteBucketId(null);
@@ -578,6 +639,7 @@ export default function App() {
     const project = createProject(trimmedName);
     dispatchPlanner({ type: 'ADD_PROJECT', project });
     setActiveProjectId(project.id);
+    setQuickTaskProjectTarget(project, true);
   };
 
   const renameProject = (projectId: string, name: string) => {
@@ -806,155 +868,156 @@ export default function App() {
     }
   };
 
-  const bucketHotkeyTargets = useMemo(
-    () => [null, ...activeBuckets.map((bucket) => bucket.id)],
-    [activeBuckets],
-  );
-
-  const openQuickTaskComposer = (defaultBucketId: string | null = null) => {
-    setQuickTaskOpen(true);
-    setQuickTaskBucketId(defaultBucketId);
-    setQuickTaskBucketName(defaultBucketId ? bucketNameById.get(defaultBucketId) ?? '' : '');
-    window.requestAnimationFrame(() => {
-      quickTaskInputRef.current?.focus();
-    });
+  const handleQuickTaskTitleChange = (value: string) => {
+    setQuickTaskTitle(value);
+    setQuickTaskMessage(null);
   };
 
-  const closeQuickTaskComposer = () => {
-    setQuickTaskOpen(false);
-    setQuickTaskTitle('');
-    setQuickTaskBucketName('');
+  const handleQuickTaskBucketNameChange = (value: string) => {
+    setQuickTaskBucketName(value);
     setQuickTaskBucketId(null);
+    setQuickTaskMessage(null);
   };
 
-  const submitQuickTask = () => {
-    const title = quickTaskTitle.trim();
-    if (!title || !effectiveActiveProjectId) return;
+  const handleQuickTaskBucketSelectionChange = (bucketId: string | null) => {
+    setQuickTaskBucketId(bucketId);
+    setQuickTaskMessage(null);
+  };
 
-    const candidateBucketName = quickTaskBucketName.trim();
-    const hasValidBucketName = candidateBucketName
-      ? QUICK_TASK_BUCKET_NAME_PATTERN.test(candidateBucketName)
-      : false;
+  const handleQuickTaskProjectNameChange = (value: string) => {
+    const normalizedProjectName = normalizeQuickAddName(value);
+    const matchingProjects = normalizedProjectName
+      ? state.projects.filter(
+        (project) => normalizeQuickAddName(project.name) === normalizedProjectName,
+      )
+      : [];
+    const targetProjectId = normalizedProjectName
+      ? (matchingProjects.length === 1 ? matchingProjects[0].id : null)
+      : (effectiveActiveProjectId || null);
 
-    let targetBucketId: string | null = null;
-    let createdBucketName: string | null = null;
+    setQuickTaskProjectName(value);
+    setQuickTaskProjectId(null);
+    setQuickTaskBucketId(findUniqueQuickTaskBucketId(targetProjectId, quickTaskBucketName));
+    setQuickTaskMessage(null);
+  };
 
-    if (candidateBucketName && hasValidBucketName) {
-      const existingBucketId = bucketIdByNormalizedName.get(normalizeBucketName(candidateBucketName)) ?? null;
-      if (existingBucketId) {
-        targetBucketId = existingBucketId;
-      } else {
-        const newBucketId = createId();
-        dispatchPlanner({ type: 'ADD_BUCKET', bucket: createBucket(effectiveActiveProjectId, candidateBucketName, newBucketId) });
-        targetBucketId = newBucketId;
-        createdBucketName = candidateBucketName;
-        setPendingBucketWarp(true);
-      }
+  const handleQuickTaskProjectSelectionChange = (projectId: string | null) => {
+    if (!projectId) {
+      setQuickTaskProjectId(null);
+      return;
     }
 
-    dispatchPlanner({
-      type: 'ADD_TASK',
-      task: createTask(effectiveActiveProjectId, {
-        title,
-        description: '',
-        bucketId: targetBucketId,
-      }),
+    const project = state.projects.find((candidate) => candidate.id === projectId);
+    if (!project) {
+      setQuickTaskProjectId(null);
+      setQuickTaskBucketId(null);
+      return;
+    }
+
+    setQuickTaskProjectId(project.id);
+    setQuickTaskProjectName(project.name);
+    setQuickTaskBucketId(findUniqueQuickTaskBucketId(project.id, quickTaskBucketName));
+    setQuickTaskMessage(null);
+  };
+
+  const submitQuickTask = (override?: {
+    projectName?: string;
+    selectedProjectId?: string | null;
+  }) => {
+    const reservedIds = new Set<string>();
+    const projectName = override?.projectName ?? quickTaskProjectName;
+    const selectedProjectId = override?.selectedProjectId === undefined
+      ? quickTaskProjectId
+      : override.selectedProjectId;
+    const result = resolveQuickAdd({
+      data: state,
+      currentProjectId: effectiveActiveProjectId,
+      draft: {
+        taskTitle: quickTaskTitle,
+        bucketName: quickTaskBucketName,
+        projectName,
+        selectedBucketId: quickTaskBucketId,
+        selectedProjectId,
+      },
+      generated: {
+        projectId: createUniquePlannerId(state, reservedIds),
+        bucketId: createUniquePlannerId(state, reservedIds),
+        taskId: createUniquePlannerId(state, reservedIds),
+        timestamp: now(),
+      },
     });
 
-    setQuickTaskTitle('');
-    if (targetBucketId) {
-      const normalized = normalizeBucketName(createdBucketName ?? candidateBucketName);
-      const stableName = activeBuckets.find((bucket) => normalizeBucketName(bucket.name) === normalized)?.name
-        ?? createdBucketName
-        ?? candidateBucketName;
-      setQuickTaskBucketId(targetBucketId);
-      setQuickTaskBucketName(stableName);
+    if (!result.ok) {
+      setQuickTaskMessage(result.message);
+      window.requestAnimationFrame(() => {
+        if (result.field === 'project') quickTaskProjectInputRef.current?.focus();
+        else if (result.field === 'bucket') quickTaskBucketInputRef.current?.focus();
+        else quickTaskInputRef.current?.focus();
+      });
+      return;
+    }
+
+    const { addition, activationProjectId } = result;
+    if (addition.project || addition.bucket || addition.task) {
+      dispatchPlanner({ type: 'APPLY_QUICK_ADD', addition });
+    }
+
+    const targetProject = addition.project
+      ?? state.projects.find((project) => project.id === activationProjectId);
+    const targetBucket = addition.bucket
+      ?? (
+        addition.task?.bucketId
+          ? state.buckets.find((bucket) => bucket.id === addition.task?.bucketId)
+          : undefined
+      )
+      ?? (
+        quickTaskBucketName.trim()
+          ? state.buckets.find((bucket) => (
+            bucket.id === findUniqueQuickTaskBucketId(activationProjectId, quickTaskBucketName)
+          ))
+          : undefined
+      );
+
+    setActiveProjectId(activationProjectId);
+    if (activationProjectId !== effectiveActiveProjectId) {
+      setSelectedTaskIds([]);
+      setSelectionAnchorTaskId(null);
+      setActivePasteBucketId(null);
+      setEditor(null);
+      setSearchQuery('');
+    }
+    if (targetProject) {
+      setQuickTaskProjectId(targetProject.id);
+      setQuickTaskProjectName(targetProject.name);
+    }
+    if (targetBucket) {
+      setQuickTaskBucketId(targetBucket.id);
+      setQuickTaskBucketName(targetBucket.name);
     } else {
       setQuickTaskBucketId(null);
       setQuickTaskBucketName('');
     }
-    setPendingTaskSurge(true);
-    quickTaskInputRef.current?.focus();
-  };
 
-  const cycleQuickTaskBucket = () => {
-    setQuickTaskBucketId((current) => {
-      const currentIndex = Math.max(0, bucketHotkeyTargets.findIndex((value) => value === current));
-      const nextIndex = (currentIndex + 1) % bucketHotkeyTargets.length;
-      const nextBucketId = bucketHotkeyTargets[nextIndex] ?? null;
-      setQuickTaskBucketName(nextBucketId ? bucketNameById.get(nextBucketId) ?? '' : '');
-      return nextBucketId;
+    const addedEntities = [
+      addition.project ? 'project' : null,
+      addition.bucket ? 'bucket' : null,
+      addition.task ? 'task' : null,
+    ].filter((entity): entity is string => entity !== null);
+    setQuickTaskMessage(
+      addedEntities.length > 0
+        ? `Added ${addedEntities.join(', ')}.`
+        : `Switched to ${targetProject?.name ?? 'the selected project'}.`,
+    );
+
+    if (addition.task) {
+      setQuickTaskTitle('');
+      setPendingTaskSurge(true);
+    }
+    if (addition.bucket) setPendingBucketWarp(true);
+
+    window.requestAnimationFrame(() => {
+      quickTaskInputRef.current?.focus();
     });
-  };
-
-  const quickTaskBucketSuggestion = useMemo(() => {
-    const typedValue = quickTaskBucketName.trim();
-    if (!typedValue) return null;
-
-    const typedLower = typedValue.toLowerCase();
-    const match = activeBuckets.find((bucket) => {
-      const name = bucket.name.trim();
-      const lower = name.toLowerCase();
-      return lower.startsWith(typedLower) && lower !== typedLower;
-    });
-
-    return match?.name ?? null;
-  }, [quickTaskBucketName, activeBuckets]);
-
-  const quickTaskBucketSuggestionSuffix = useMemo(() => {
-    if (!quickTaskBucketSuggestion) return '';
-    const typedValue = quickTaskBucketName.trim();
-    if (!typedValue) return '';
-    return quickTaskBucketSuggestion.slice(typedValue.length);
-  }, [quickTaskBucketName, quickTaskBucketSuggestion]);
-
-  const handleQuickTaskTitleKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeQuickTaskComposer();
-      return;
-    }
-
-    if (/^[0-9]$/.test(event.key)) {
-      const digit = Number(event.key);
-      const bucketTarget = digit === 0 ? null : activeBuckets[digit - 1]?.id;
-      if (digit === 0 || bucketTarget) {
-        event.preventDefault();
-        setQuickTaskBucketId(bucketTarget ?? null);
-        setQuickTaskBucketName(bucketTarget ? bucketNameById.get(bucketTarget) ?? '' : '');
-      }
-      return;
-    }
-
-    if (event.key !== 'Enter') return;
-
-    event.preventDefault();
-    submitQuickTask();
-  };
-
-  const handleQuickTaskBucketKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeQuickTaskComposer();
-      return;
-    }
-
-    if (event.key === 'ArrowRight' && quickTaskBucketSuggestion) {
-      const input = event.currentTarget;
-      const cursorAtEnd = input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
-      if (cursorAtEnd) {
-        event.preventDefault();
-        setQuickTaskBucketName(quickTaskBucketSuggestion);
-        const bucketId = bucketIdByNormalizedName.get(normalizeBucketName(quickTaskBucketSuggestion)) ?? null;
-        setQuickTaskBucketId(bucketId);
-      }
-      return;
-    }
-
-    if (event.key !== 'Enter') return;
-
-    event.preventDefault();
-    submitQuickTask();
   };
 
   const registerBucketElement = (bucketId: string, element: HTMLElement | null) => {
@@ -1037,8 +1100,18 @@ export default function App() {
       const fallbackProjectId = activeProjectId === confirmDialog.action.projectId
         ? selectNearestProjectIdAfterDeletion(state.projects, confirmDialog.action.projectId)
         : activeProjectId;
+      const fallbackProject = state.projects.find((project) => project.id === fallbackProjectId);
       dispatchPlanner({ type: 'DELETE_PROJECT', projectId: confirmDialog.action.projectId });
       setActiveProjectId(fallbackProjectId);
+      if (quickTaskProjectId === confirmDialog.action.projectId) {
+        if (fallbackProject) {
+          setQuickTaskProjectTarget(fallbackProject);
+        } else {
+          setQuickTaskProjectId(null);
+          setQuickTaskProjectName('');
+          setQuickTaskBucketId(null);
+        }
+      }
       setSelectedTaskIds([]);
       setSelectionAnchorTaskId(null);
       setActivePasteBucketId(null);
@@ -1185,10 +1258,20 @@ export default function App() {
 
   const confirmRestoreData = () => {
     if (!pendingRestoreData) return;
+    const restoredProjectId = selectInitialProjectId(pendingRestoreData.projects);
+    const restoredProject = pendingRestoreData.projects.find(
+      (project) => project.id === restoredProjectId,
+    );
     setLastRestoreBackup(state);
     setHideRestoreUndoCard(false);
     setIsRestoreUndoClosing(false);
     dispatchPlanner({ type: 'REPLACE_DATA', data: pendingRestoreData });
+    setActiveProjectId(restoredProjectId);
+    setQuickTaskProjectId(restoredProjectId || null);
+    setQuickTaskProjectName(restoredProject?.name ?? '');
+    setQuickTaskBucketId(null);
+    setQuickTaskBucketName('');
+    setQuickTaskMessage(null);
     setPendingRestoreData(null);
     setDataActionMessage(null);
   };
@@ -1213,7 +1296,17 @@ export default function App() {
 
   const undoRestoreData = () => {
     if (!lastRestoreBackup) return;
+    const restoredProjectId = selectInitialProjectId(lastRestoreBackup.projects);
+    const restoredProject = lastRestoreBackup.projects.find(
+      (project) => project.id === restoredProjectId,
+    );
     dispatchPlanner({ type: 'REPLACE_DATA', data: lastRestoreBackup });
+    setActiveProjectId(restoredProjectId);
+    setQuickTaskProjectId(restoredProjectId || null);
+    setQuickTaskProjectName(restoredProject?.name ?? '');
+    setQuickTaskBucketId(null);
+    setQuickTaskBucketName('');
+    setQuickTaskMessage(null);
     setLastRestoreBackup(null);
     setHideRestoreUndoCard(false);
     setIsRestoreUndoClosing(false);
@@ -1648,11 +1741,6 @@ export default function App() {
     ensureScrollableTargetInView(sidepanelRef.current, exportScopeMenuRef.current);
   }, [showExportScopeMenu]);
 
-  useEffect(() => {
-    if (!quickTaskOpen) return;
-    ensureScrollableTargetInView(sidepanelRef.current, quickTaskShellRef.current, 16);
-  }, [quickTaskOpen]);
-
   const clearSidepanelCloseTimer = () => {
     if (sidepanelCloseTimeoutRef.current !== null) {
       window.clearTimeout(sidepanelCloseTimeoutRef.current);
@@ -1997,19 +2085,21 @@ export default function App() {
             onApplyTemplate={applyTemplateToActiveProject}
             quickTaskShellRef={quickTaskShellRef}
             quickTaskInputRef={quickTaskInputRef}
+            quickTaskProjectInputRef={quickTaskProjectInputRef}
             quickTaskBucketInputRef={quickTaskBucketInputRef}
-            quickTaskOpen={quickTaskOpen}
             quickTaskTitle={quickTaskTitle}
+            quickTaskProjectName={quickTaskProjectName}
+            quickTaskProjectId={quickTaskProjectId}
             quickTaskBucketName={quickTaskBucketName}
-            quickTaskBucketSuggestionSuffix={quickTaskBucketSuggestionSuffix}
+            quickTaskBucketId={quickTaskBucketId}
+            quickTaskProjectBuckets={quickTaskProjectBuckets}
+            quickTaskMessage={quickTaskMessage}
             activeBuckets={activeBuckets}
-            bucketIdByNormalizedName={bucketIdByNormalizedName}
-            normalizeBucketName={normalizeBucketName}
-            onQuickTaskTitleChange={setQuickTaskTitle}
-            onQuickTaskBucketNameChange={setQuickTaskBucketName}
-            onQuickTaskBucketIdChange={setQuickTaskBucketId}
-            onQuickTaskTitleKeyDown={handleQuickTaskTitleKeyDown}
-            onQuickTaskBucketKeyDown={handleQuickTaskBucketKeyDown}
+            onQuickTaskTitleChange={handleQuickTaskTitleChange}
+            onQuickTaskProjectNameChange={handleQuickTaskProjectNameChange}
+            onQuickTaskProjectIdChange={handleQuickTaskProjectSelectionChange}
+            onQuickTaskBucketNameChange={handleQuickTaskBucketNameChange}
+            onQuickTaskBucketIdChange={handleQuickTaskBucketSelectionChange}
             onSubmitQuickTask={submitQuickTask}
             bucketName={bucketName}
             onBucketNameChange={setBucketName}

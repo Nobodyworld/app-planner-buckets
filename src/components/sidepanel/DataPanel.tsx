@@ -2,6 +2,7 @@ import type { ChangeEvent, RefObject } from 'react';
 import type { BucketV2 as Bucket } from '../../types/v2';
 
 export interface DataPanelProps {
+    embedded?: boolean;
     uploadInputRef: RefObject<HTMLInputElement>;
     restoreInputRef: RefObject<HTMLInputElement>;
     uploadConfirmRef: RefObject<HTMLDivElement>;
@@ -34,6 +35,7 @@ export interface DataPanelProps {
 }
 
 export function DataPanel({
+    embedded = false,
     uploadInputRef,
     restoreInputRef,
     uploadConfirmRef,
@@ -64,9 +66,14 @@ export function DataPanel({
     onRestoreFileChange,
     onUploadFileChange,
 }: DataPanelProps) {
+    const Wrapper = embedded ? 'div' : 'section';
+
     return (
-        <section className="panel-card data-panel" aria-label="Data controls">
-            <h2>Data</h2>
+        <Wrapper
+            className={`${embedded ? 'data-panel-content' : 'panel-card data-panel'}`}
+            aria-label={embedded ? undefined : 'Data controls'}
+        >
+            {!embedded ? <h2>Data</h2> : null}
             <p className="section-helper">
                 Export a backup any time. Upload and restore actions are in Advanced options.
             </p>
@@ -244,6 +251,6 @@ export function DataPanel({
                 aria-label="Upload planner data from JSON"
                 onChange={onUploadFileChange}
             />
-        </section>
+        </Wrapper>
     );
 }

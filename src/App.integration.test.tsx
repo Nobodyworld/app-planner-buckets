@@ -401,6 +401,16 @@ const readRuntimePlannerData = (): PlannerDataV2 => (
     JSON.parse(localStorage.getItem(V2_STORAGE_KEY) ?? '{}') as PlannerDataV2
 );
 
+const expandSidebarSection = (
+    name: 'Projects' | 'Templates' | 'Archive / View Options' | 'Data',
+) => {
+    const toggle = screen.getByRole('button', { name: new RegExp(`^${name}`) });
+    if (toggle.getAttribute('aria-expanded') === 'false') {
+        fireEvent.click(toggle);
+    }
+    return toggle;
+};
+
 const createDragDataTransfer = (): DataTransfer => {
     const values = new Map<string, string>();
     return {
@@ -654,6 +664,43 @@ describe('App integration', () => {
         expect(toggleGroup).toHaveAttribute('data-expanded', 'true');
     });
 
+    it('orders sidebar cards and keeps each secondary section independently collapsed', () => {
+        render(<App />);
+        fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
+
+        const controls = screen.getByRole('complementary', { name: 'Planner controls' });
+        const cardNames = Array.from(controls.querySelectorAll(':scope > .panel-card')).map((card) => (
+            card.getAttribute('aria-label')
+            ?? card.querySelector('.sidebar-disclosure-title')?.textContent
+        ));
+        expect(cardNames).toEqual([
+            'Quick add',
+            'Create bucket',
+            'Projects',
+            'Templates',
+            'Archive / View Options',
+            'Data',
+        ]);
+
+        const projectsToggle = screen.getByRole('button', { name: /^Projects/ });
+        const templatesToggle = screen.getByRole('button', { name: /^Templates/ });
+        const archiveToggle = screen.getByRole('button', { name: /^Archive \/ View Options/ });
+        const dataToggle = screen.getByRole('button', { name: /^Data/ });
+        [projectsToggle, templatesToggle, archiveToggle, dataToggle].forEach((toggle) => {
+            expect(toggle).toHaveAttribute('aria-expanded', 'false');
+            expect(document.getElementById(toggle.getAttribute('aria-controls') ?? '')).toHaveAttribute('hidden');
+        });
+
+        fireEvent.click(projectsToggle);
+        dataToggle.focus();
+        fireEvent.click(dataToggle);
+        expect(projectsToggle).toHaveAttribute('aria-expanded', 'true');
+        expect(dataToggle).toHaveAttribute('aria-expanded', 'true');
+        expect(templatesToggle).toHaveAttribute('aria-expanded', 'false');
+        expect(archiveToggle).toHaveAttribute('aria-expanded', 'false');
+        expect(dataToggle).toHaveFocus();
+    });
+
     it('does not auto-open the sidepanel when auto-open lock is enabled', () => {
         vi.useFakeTimers();
         const { container } = render(<App />);
@@ -782,10 +829,17 @@ describe('App integration', () => {
         render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
-        fireEvent.change(screen.getByLabelText('Quick add task title'), {
+        const titleInput = screen.getByLabelText('Task title');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+        const projectInput = screen.getByRole('combobox', { name: 'Project' });
+        fireEvent.change(titleInput, {
             target: { value: 'Undo target task' },
         });
-        fireEvent.keyDown(screen.getByLabelText('Quick add task title'), { key: 'Enter' });
+        fireEvent.keyDown(titleInput, { key: 'Enter' });
+        expect(bucketInput).toHaveFocus();
+        fireEvent.keyDown(bucketInput, { key: 'Enter' });
+        expect(projectInput).toHaveFocus();
+        fireEvent.keyDown(projectInput, { key: 'Enter' });
 
         expect(screen.getByRole('button', { name: 'Undo target task' })).toBeInTheDocument();
 
@@ -807,14 +861,18 @@ describe('App integration', () => {
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
 
-        fireEvent.change(screen.getByLabelText('Quick add task title'), {
+        fireEvent.change(screen.getByLabelText('Task title'), {
             target: { value: 'Draft release notes' },
         });
-        fireEvent.change(screen.getByLabelText('Quick add bucket name'), {
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+        const projectInput = screen.getByRole('combobox', { name: 'Project' });
+        fireEvent.change(bucketInput, {
             target: { value: 'Release Prep' },
         });
 
-        fireEvent.keyDown(screen.getByLabelText('Quick add bucket name'), { key: 'Enter' });
+        fireEvent.keyDown(bucketInput, { key: 'Enter' });
+        expect(projectInput).toHaveFocus();
+        fireEvent.keyDown(projectInput, { key: 'Enter' });
 
         expect(screen.getByRole('heading', { name: 'Release Prep' })).toBeInTheDocument();
 
@@ -826,64 +884,188 @@ describe('App integration', () => {
         expect(createdTask?.bucketId).toBe(createdBucket?.id);
     });
 
-    it('falls back to Unassigned when quick-add bucket text is invalid', () => {
+    it('clears only the task title after submitting to a chosen project and bucket', () => {
+        localStorage.clear();
+        seedPlannerDataV2();
         render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
 
-        fireEvent.change(screen.getByLabelText('Quick add task title'), {
+        const titleInput = screen.getByLabelText('Task title');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+        const projectInput = screen.getByRole('combobox', { name: 'Project' });
+        fireEvent.change(titleInput, { target: { value: 'Retained target task' } });
+        fireEvent.change(bucketInput, { target: { value: 'Beta Bucket' } });
+        fireEvent.keyDown(bucketInput, { key: 'Enter' });
+        fireEvent.keyDown(projectInput, { key: 'Enter' });
+
+        expect(titleInput).toHaveValue('');
+        expect(bucketInput).toHaveValue('Beta Bucket');
+        expect(projectInput).toHaveValue('Beta');
+
+        const createdTask = readRuntimePlannerData().tasks.find(
+            (task) => task.title === 'Retained target task',
+        );
+        expect(createdTask).toMatchObject({
+            projectId: 'project-b',
+            bucketId: 'bucket-beta',
+        });
+    });
+
+    it('scopes bucket suggestions and re-resolves a same-name bucket when Project changes', () => {
+        localStorage.clear();
+        const scopedQuickAddFixture: PlannerDataV2 = {
+            ...plannerV2Fixture,
+            buckets: [
+                ...plannerV2Fixture.buckets,
+                {
+                    ...plannerV2Fixture.buckets[0],
+                    id: 'bucket-alpha-shared',
+                    name: 'Shared',
+                },
+                {
+                    ...plannerV2Fixture.buckets[1],
+                    id: 'bucket-beta-shared',
+                    name: 'Shared',
+                },
+            ],
+        };
+        seedPlannerDataV2(scopedQuickAddFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
+
+        const titleInput = screen.getByLabelText('Task title');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+        const projectInput = screen.getByRole('combobox', { name: 'Project' });
+        fireEvent.change(titleInput, { target: { value: 'Project-scoped task' } });
+        fireEvent.change(bucketInput, { target: { value: 'Shared' } });
+        fireEvent.keyDown(bucketInput, { key: 'Enter' });
+
+        fireEvent.change(projectInput, { target: { value: 'Alpha' } });
+        expect(bucketInput).toHaveValue('Shared');
+
+        fireEvent.blur(projectInput);
+        fireEvent.focus(bucketInput);
+        expect(screen.getByRole('option', { name: 'Shared' })).toHaveAttribute('aria-selected', 'true');
+
+        fireEvent.change(bucketInput, { target: { value: '' } });
+        expect(screen.getByRole('option', { name: 'Alpha Bucket' })).toBeInTheDocument();
+        expect(screen.getByRole('option', { name: 'Shared' })).toBeInTheDocument();
+        expect(screen.queryByRole('option', { name: 'Beta Bucket' })).not.toBeInTheDocument();
+
+        fireEvent.change(bucketInput, { target: { value: 'Shared' } });
+        fireEvent.keyDown(bucketInput, { key: 'Enter' });
+        fireEvent.keyDown(projectInput, { key: 'Enter' });
+
+        const saved = readRuntimePlannerData();
+        const createdTask = saved.tasks.find((task) => task.title === 'Project-scoped task');
+        expect(createdTask).toMatchObject({
+            projectId: 'project-a',
+            bucketId: 'bucket-alpha-shared',
+        });
+        expect(saved.buckets.filter((bucket) => (
+            bucket.projectId === 'project-a' && bucket.name === 'Shared'
+        ))).toHaveLength(1);
+    });
+
+    it('activates a newly created project from Quick Add', () => {
+        localStorage.clear();
+        seedPlannerDataV2();
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
+
+        const titleInput = screen.getByLabelText('Task title');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+        const projectInput = screen.getByRole('combobox', { name: 'Project' });
+        fireEvent.change(titleInput, { target: { value: 'Kickoff checklist' } });
+        fireEvent.change(bucketInput, { target: { value: 'Intake' } });
+        fireEvent.change(projectInput, { target: { value: 'Gamma Initiative' } });
+        fireEvent.keyDown(projectInput, { key: 'Enter' });
+
+        const saved = readRuntimePlannerData();
+        const createdProject = saved.projects.find((project) => project.name === 'Gamma Initiative');
+        const createdBucket = saved.buckets.find((bucket) => (
+            bucket.projectId === createdProject?.id && bucket.name === 'Intake'
+        ));
+        const createdTask = saved.tasks.find((task) => task.title === 'Kickoff checklist');
+
+        expect(createdProject).toBeTruthy();
+        expect(createdBucket).toBeTruthy();
+        expect(createdTask).toMatchObject({
+            projectId: createdProject?.id,
+            bucketId: createdBucket?.id,
+        });
+        expect(screen.getByRole('heading', { name: 'Intake' })).toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: 'Beta Bucket' })).not.toBeInTheDocument();
+        expect(titleInput).toHaveValue('');
+        expect(bucketInput).toHaveValue('Intake');
+        expect(projectInput).toHaveValue('Gamma Initiative');
+    });
+
+    it('creates a novel bucket name and assigns the quick-added task to it', () => {
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
+
+        fireEvent.change(screen.getByLabelText('Task title'), {
             target: { value: 'Follow up with vendor' },
         });
-        fireEvent.change(screen.getByLabelText('Quick add bucket name'), {
+        fireEvent.change(screen.getByRole('combobox', { name: 'Bucket' }), {
             target: { value: '@@@' },
         });
 
-        fireEvent.keyDown(screen.getByLabelText('Quick add bucket name'), { key: 'Enter' });
+        fireEvent.keyDown(screen.getByRole('combobox', { name: 'Bucket' }), { key: 'Enter' });
+        fireEvent.keyDown(screen.getByRole('combobox', { name: 'Project' }), { key: 'Enter' });
 
         const saved = readRuntimePlannerData();
+        const createdBucket = saved.buckets.find((bucket) => bucket.name === '@@@');
         const createdTask = saved.tasks.find((task) => task.title === 'Follow up with vendor');
 
-        expect(createdTask?.bucketId).toBeNull();
-        expect(saved.buckets.some((bucket) => bucket.name === '@@@')).toBe(false);
+        expect(createdBucket).toBeTruthy();
+        expect(createdTask?.bucketId).toBe(createdBucket?.id);
     });
 
-    it('accepts bucket autocomplete with ArrowRight and submits to that bucket', () => {
+    it('accepts a filtered bucket option with Enter and submits from the Project field', () => {
         render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
 
-        fireEvent.change(screen.getByLabelText('Quick add task title'), {
+        fireEvent.change(screen.getByLabelText('Task title'), {
             target: { value: 'Call supplier' },
         });
 
-        const bucketInput = screen.getByLabelText('Quick add bucket name');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
         fireEvent.change(bucketInput, {
             target: { value: 'To' },
         });
-        fireEvent.keyDown(bucketInput, { key: 'ArrowRight' });
+        expect(screen.getByRole('option', { name: 'To Do' })).toBeInTheDocument();
+        fireEvent.keyDown(bucketInput, { key: 'Enter' });
 
         expect((bucketInput as HTMLInputElement).value).toBe('To Do');
-
-        fireEvent.keyDown(bucketInput, { key: 'Enter' });
+        const projectInput = screen.getByRole('combobox', { name: 'Project' });
+        expect(projectInput).toHaveFocus();
+        fireEvent.keyDown(projectInput, { key: 'Enter' });
 
         const saved = readRuntimePlannerData();
         const createdTask = saved.tasks.find((task) => task.title === 'Call supplier');
         expect(createdTask?.bucketId).toBe('bucket-todo');
     });
 
-    it('shows ghost autocomplete suffix in quick bucket input while typing', () => {
-        const { container } = render(<App />);
+    it('shows filtered listbox options in the bucket combobox while typing', () => {
+        render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
 
-        const bucketInput = screen.getByLabelText('Quick add bucket name');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
         fireEvent.change(bucketInput, {
             target: { value: 'To' },
         });
 
-        const ghostSuffix = container.querySelector('.quick-task-bucket-ghost-suffix');
-        expect(ghostSuffix).toBeTruthy();
-        expect(ghostSuffix?.textContent).toBe(' Do');
+        expect(bucketInput).toHaveAttribute('aria-expanded', 'true');
+        expect(screen.getByRole('listbox', { name: 'Bucket suggestions' })).toBeInTheDocument();
+        expect(screen.getByRole('option', { name: 'To Do' })).toBeInTheDocument();
     });
 
     it('keeps board inline task input open after submitting tasks', () => {
@@ -1236,6 +1418,7 @@ describe('App integration', () => {
         seedPlannerDataV2();
 
         render(<App />);
+        expandSidebarSection('Projects');
 
         fireEvent.change(screen.getByLabelText('Active project'), {
             target: { value: 'project-a' },
@@ -1252,6 +1435,7 @@ describe('App integration', () => {
         render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
+        expandSidebarSection('Projects');
 
         const newProjectInput = screen.getByLabelText('New project name');
         fireEvent.change(newProjectInput, { target: { value: 'Roadmap' } });
@@ -1279,6 +1463,7 @@ describe('App integration', () => {
         seedPlannerDataV2();
 
         render(<App />);
+        expandSidebarSection('Projects');
 
         fireEvent.click(screen.getByRole('button', { name: 'Delete project' }));
         fireEvent.click(screen.getAllByRole('button', { name: 'Delete project' }).at(-1)!);
@@ -1326,6 +1511,7 @@ describe('App integration', () => {
         vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
 
         render(<App />);
+        expandSidebarSection('Data');
 
         fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
 
@@ -1344,6 +1530,7 @@ describe('App integration', () => {
         seedPlannerDataV2();
 
         render(<App />);
+        expandSidebarSection('Data');
 
         const file = new File([JSON.stringify(plannerFixture)], 'planner-v1.json', { type: 'application/json' });
         fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
@@ -1365,6 +1552,7 @@ describe('App integration', () => {
 
     it('restores valid v2 JSON directly', async () => {
         render(<App />);
+        expandSidebarSection('Data');
 
         const file = new File([JSON.stringify(plannerV2Fixture)], 'planner-v2.json', { type: 'application/json' });
         fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
@@ -1389,6 +1577,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2ScopedExportFixture);
 
         render(<App />);
+        expandSidebarSection('Data');
 
         const malformed: PlannerDataV2 = {
             ...plannerV2ScopedExportFixture,
@@ -1446,6 +1635,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2TemplateFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         fireEvent.click(screen.getByRole('button', { name: 'Apply to Beta' }));
 
@@ -1479,6 +1669,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2TemplateFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         fireEvent.click(screen.getByRole('button', { name: 'Apply to Beta' }));
         await waitFor(() => {
@@ -1497,6 +1688,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2PartialTemplateFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         fireEvent.click(screen.getByRole('button', { name: 'Apply to Beta' }));
         await waitFor(() => {
@@ -1513,6 +1705,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2ZeroEligibleTemplateFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         const beforeApplySnapshot = localStorage.getItem(V2_STORAGE_KEY);
         const undoButton = screen.getByRole('button', { name: 'Undo' });
@@ -1547,6 +1740,8 @@ describe('App integration', () => {
         vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
 
         render(<App />);
+        expandSidebarSection('Projects');
+        expandSidebarSection('Data');
 
         fireEvent.change(screen.getByLabelText('Active project'), {
             target: { value: 'project-b' },
@@ -1598,6 +1793,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2TemplateFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         const definitionInput = screen.getByTestId('template-definition-name-definition-ready');
         fireEvent.change(definitionInput, { target: { value: 'Ready Renamed' } });
@@ -1630,6 +1826,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2ScopedExportFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         const templateSelect = screen.getByLabelText('Selected template');
         fireEvent.change(templateSelect, { target: { value: 'template-launch' } });
@@ -1652,6 +1849,8 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2ScopedExportFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
+        expandSidebarSection('Data');
 
         const draftInput = screen.getByTestId('template-definition-name-definition-launch-ready');
         fireEvent.change(draftInput, { target: { value: 'Unsaved Draft Name' } });
@@ -1683,6 +1882,7 @@ describe('App integration', () => {
 
     it('creates and edits templates and definitions from the Template Library', async () => {
         render(<App />);
+        expandSidebarSection('Templates');
 
         fireEvent.change(screen.getByLabelText('New template name'), { target: { value: 'Ops Template' } });
         fireEvent.keyDown(screen.getByLabelText('New template name'), { key: 'Enter' });
@@ -1724,6 +1924,7 @@ describe('App integration', () => {
         vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
 
         render(<App />);
+        expandSidebarSection('Data');
 
         fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
         const exported = JSON.parse(await exportedBlob!.text()) as PlannerDataV2;

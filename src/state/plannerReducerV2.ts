@@ -1,8 +1,10 @@
 import type { TaskDraft } from '../types';
+import type { QuickAddAddition } from '../services/quickAdd';
 import type { BucketTemplate, BucketTemplateDefinition, BucketV2, PlannerDataV2, PlannerTaskV2, Project } from '../types/v2';
 import { validatePlannerDataV2Integrity } from '../types/validators';
 
 export type PlannerActionV2 =
+  | { type: 'APPLY_QUICK_ADD'; addition: QuickAddAddition }
   | { type: 'ADD_PROJECT'; project: Project }
   | { type: 'RENAME_PROJECT'; projectId: string; name: string; updatedAt: string }
   | { type: 'UPDATE_PROJECT_DESCRIPTION'; projectId: string; description: string; updatedAt: string }
@@ -338,11 +340,114 @@ const moveTasksWithOrder = (
   return areSameTaskPositions(tasks, nextTasks, selectedTaskIds, bucketId) ? tasks : nextTasks;
 };
 
+const applyQuickAddAddition = (
+  state: PlannerDataV2,
+  addition: QuickAddAddition,
+): PlannerDataV2 => {
+  const project = addition.project
+    ? {
+      ...addition.project,
+      name: addition.project.name.trim(),
+      description: addition.project.description.trim(),
+    }
+    : undefined;
+  const bucket = addition.bucket
+    ? {
+      ...addition.bucket,
+      name: addition.bucket.name.trim(),
+      description: addition.bucket.description.trim(),
+    }
+    : undefined;
+  const task = addition.task
+    ? {
+      ...addition.task,
+      title: addition.task.title.trim(),
+      description: addition.task.description.trim(),
+    }
+    : undefined;
+
+  if (!project && !bucket && !task) return state;
+  if (project && !project.name) return state;
+  if (bucket && !bucket.name) return state;
+  if (task && !task.title) return state;
+
+  const additions = [project, bucket, task].filter(
+    (entity): entity is Project | BucketV2 | PlannerTaskV2 => entity !== undefined,
+  );
+  const incomingIds = new Set<string>();
+  for (const entity of additions) {
+    if (!entity.id || entity.id !== entity.id.trim()) return state;
+    if (incomingIds.has(entity.id) || hasPlannerDataV2Id(state, entity.id)) return state;
+    incomingIds.add(entity.id);
+  }
+
+  const projectIds = [
+    project?.id,
+    bucket?.projectId,
+    task?.projectId,
+  ].filter((projectId): projectId is string => projectId !== undefined);
+  const targetProjectId = projectIds[0];
+  if (!targetProjectId || projectIds.some((projectId) => projectId !== targetProjectId)) return state;
+
+  if (project) {
+    if (project.id !== targetProjectId) return state;
+  } else if (!state.projects.some((item) => item.id === targetProjectId)) {
+    return state;
+  }
+
+  if (bucket?.templateDefinitionId !== null && bucket?.templateDefinitionId !== undefined) {
+    if (!state.templateDefinitions.some((definition) => definition.id === bucket.templateDefinitionId)) {
+      return state;
+    }
+    if (state.buckets.some((item) => (
+      item.projectId === targetProjectId
+      && item.templateDefinitionId === bucket.templateDefinitionId
+    ))) {
+      return state;
+    }
+  }
+
+  if (task?.bucketId !== null && task?.bucketId !== undefined) {
+    const referencesIncomingBucket = bucket?.id === task.bucketId;
+    const referencesExistingBucket = state.buckets.some((item) => (
+      item.id === task.bucketId && item.projectId === targetProjectId
+    ));
+    if (!referencesIncomingBucket && !referencesExistingBucket) return state;
+  }
+
+  let nextState = state;
+  if (project) {
+    nextState = {
+      ...nextState,
+      projects: normalizePinnedOrder([...nextState.projects, project]),
+    };
+  }
+
+  if (bucket) {
+    const projectBuckets = nextState.buckets.filter((item) => item.projectId === targetProjectId);
+    nextState = replaceProjectBuckets(
+      nextState,
+      targetProjectId,
+      normalizePinnedOrder([...projectBuckets, bucket]),
+    );
+  }
+
+  if (task) {
+    const projectTasks = nextState.tasks.filter((item) => item.projectId === targetProjectId);
+    nextState = replaceProjectTasks(nextState, targetProjectId, [...projectTasks, task]);
+  }
+
+  return nextState;
+};
+
 export const plannerReducerV2 = (
   state: PlannerDataV2,
   action: PlannerActionV2,
 ): PlannerDataV2 => {
   switch (action.type) {
+    case 'APPLY_QUICK_ADD':
+      return applyQuickAddAddition(state, action.addition);
+
     case 'ADD_PROJECT': {
       if (!action.project.name.trim()) return state;
       if (hasPlannerDataV2Id(state, action.project.id)) return state;

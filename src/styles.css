@@ -491,6 +491,78 @@ button {
   letter-spacing: 0.02em;
 }
 
+.sidebar-disclosure {
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.sidebar-disclosure-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  padding: calc(12px * var(--space-scale));
+  color: var(--text);
+  font: inherit;
+  font-weight: 750;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.sidebar-disclosure-toggle:hover {
+  background: color-mix(in oklab, var(--surface) 74%, var(--primary) 9%);
+}
+
+.sidebar-disclosure-toggle:focus-visible {
+  outline: 3px solid rgba(79, 110, 210, 0.26);
+  outline-offset: -3px;
+}
+
+.sidebar-disclosure-chevron {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  place-items: center;
+  color: var(--muted);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.sidebar-disclosure-toggle[aria-expanded="true"] .sidebar-disclosure-chevron {
+  transform: rotate(90deg);
+}
+
+.sidebar-disclosure-title {
+  min-width: 0;
+  flex: 1;
+  font-family: var(--font-display);
+}
+
+.sidebar-disclosure-toggle .toolbar-meta {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.sidebar-disclosure-region {
+  display: grid;
+  min-width: 0;
+  gap: calc(10px * var(--space-scale));
+  padding: 0 calc(12px * var(--space-scale)) calc(12px * var(--space-scale));
+  border-top: 1px solid var(--popup-border);
+}
+
+.sidebar-disclosure-region[hidden] {
+  display: none;
+}
+
+.sidebar-disclosure-region > :first-child {
+  margin-top: calc(12px * var(--space-scale));
+}
+
 .panel-primary {
   width: 100%;
 }
@@ -511,40 +583,73 @@ button {
 
 .quick-task-input-stack {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }
 
-.quick-task-bucket-input {
-  padding-block: calc(10px / var(--density-scale));
+.quick-add-field-label,
+.quick-add-combobox > label {
   color: var(--muted);
-  font-size: 0.82rem;
+  font-size: 0.74rem;
+  font-weight: 750;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
 }
 
-.quick-task-bucket-field {
+.quick-add-combobox {
   position: relative;
+  display: grid;
+  gap: 5px;
   min-width: 0;
 }
 
-.quick-task-bucket-ghost {
-  position: absolute;
-  inset: calc(10px / var(--density-scale)) calc(12px / var(--density-scale));
-  z-index: 1;
-  display: block;
-  overflow: hidden;
-  white-space: nowrap;
-  pointer-events: none;
-  color: var(--muted);
+.quick-add-combobox > input {
+  padding-block: calc(10px / var(--density-scale));
   font-size: 0.82rem;
-  opacity: 0.82;
 }
 
-.quick-task-bucket-ghost-typed {
-  color: transparent;
+.quick-add-options {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  display: grid;
+  max-height: 180px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--popup-border);
+  border-radius: 10px;
+  list-style: none;
+  background: var(--popup-surface);
+  box-shadow: var(--shadow-strong);
 }
 
-.quick-task-bucket-ghost-suffix {
-  opacity: 0.88;
+.quick-add-option {
+  display: grid;
+  gap: 2px;
+  padding: 8px 9px;
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.quick-add-option.highlighted {
+  background: color-mix(in oklab, var(--surface) 74%, var(--primary) 18%);
+}
+
+.quick-add-option small {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.quick-add-message {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
 }
 
 .quick-task-input:focus {
@@ -552,7 +657,7 @@ button {
   outline: 3px solid rgba(79, 110, 210, 0.15);
 }
 
-.quick-task-bucket-input:focus {
+.quick-add-combobox > input:focus {
   border-color: #4f6ed2;
   outline: 3px solid rgba(79, 110, 210, 0.15);
   color: var(--text);
@@ -3077,7 +3182,7 @@ h1 {
     font-size: 0.92rem;
   }
 
-  .quick-task-bucket-input {
+  .quick-add-combobox > input {
     font-size: 0.78rem;
   }
 
