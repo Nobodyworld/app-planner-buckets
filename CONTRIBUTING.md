@@ -17,6 +17,19 @@ npm install
 npm run dev
 ```
 
+## Windows desktop shell
+
+The browser and desktop applications share the same frontend source. Keep `npm run dev` as the browser command.
+
+To build the Windows shell, install Rust stable for `x86_64-pc-windows-msvc`, Microsoft C++ Build Tools with **Desktop development with C++**, and WebView2 (included with supported Windows 10 and Windows 11 versions).
+
+```bash
+npm run desktop:dev
+npm run desktop:build
+```
+
+The desktop shell currently uses WebView `localStorage`. Export JSON backups during testing; durable desktop persistence and backups belong to #40, and signed updater/release work belongs to #41.
+
 ## Branch and PR workflow
 
 1. Create a feature branch from `main`.
@@ -25,6 +38,10 @@ npm run dev
 
 ```bash
 npm run verify
+cargo fmt --manifest-path src-tauri/Cargo.toml --check
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
+npm run desktop:build
 ```
 
 4. Open a PR with:

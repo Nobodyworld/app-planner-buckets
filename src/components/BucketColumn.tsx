@@ -8,6 +8,7 @@ interface BucketColumnProps {
     tasks: PlannerTask[];
     draggedTaskId: string | null;
     isBucketDragActive?: boolean;
+    isBucketDragSource?: boolean;
     nudgeFromLeftGap?: boolean;
     nudgeFromRightGap?: boolean;
     isBucketDropSettled?: boolean;
@@ -34,6 +35,9 @@ interface BucketColumnProps {
     canPasteIntoBucket?: boolean;
     onBucketDragStart?: (bucketId: string) => void;
     onBucketDragEnd?: () => void;
+    bucketDropIndex?: number;
+    onBucketDragHover?: (targetIndex: number) => void;
+    onBucketDrop?: (targetIndex: number) => void;
     onMoveBucketByOffset?: (bucketId: string, offset: -1 | 1) => void;
     canMoveBucketLeft?: boolean;
     canMoveBucketRight?: boolean;
@@ -58,6 +62,7 @@ export function BucketColumn({
     tasks,
     draggedTaskId,
     isBucketDragActive = false,
+    isBucketDragSource = false,
     nudgeFromLeftGap = false,
     nudgeFromRightGap = false,
     isBucketDropSettled = false,
@@ -84,6 +89,9 @@ export function BucketColumn({
     canPasteIntoBucket = false,
     onBucketDragStart,
     onBucketDragEnd,
+    bucketDropIndex,
+    onBucketDragHover,
+    onBucketDrop,
     onMoveBucketByOffset,
     canMoveBucketLeft = false,
     canMoveBucketRight = false,
@@ -93,6 +101,7 @@ export function BucketColumn({
     onRenameBucket,
     onDeleteBucket,
 }: BucketColumnProps) {
+    const [isEntering, setIsEntering] = useState(true);
     const [isOver, setIsOver] = useState(false);
     const [activeDropIndex, setActiveDropIndex] = useState<number | null>(null);
     const [settledDropIndex, setSettledDropIndex] = useState<number | null>(null);
@@ -101,6 +110,7 @@ export function BucketColumn({
     const [isInlineTaskEntryOpen, setIsInlineTaskEntryOpen] = useState(false);
     const settleTimeoutRef = useRef<number | null>(null);
     const inlineTaskInputRef = useRef<HTMLInputElement>(null);
+    const bucketDragPreviewRef = useRef<HTMLElement | null>(null);
     const bucketId = bucket?.id ?? null;
     const bucketLabel = bucket?.name ?? 'Unassigned';
     const accentIndex = accentIndexFromBucket(bucketId);
@@ -120,11 +130,58 @@ export function BucketColumn({
         setActiveDropIndex(null);
     }, [isBucketDragActive]);
 
+    const removeBucketDragPreview = () => {
+        bucketDragPreviewRef.current?.remove();
+        bucketDragPreviewRef.current = null;
+    };
+
     useEffect(() => () => {
         if (settleTimeoutRef.current !== null) {
             window.clearTimeout(settleTimeoutRef.current);
         }
+        removeBucketDragPreview();
     }, []);
+
+    const startBucketDrag = (event: DragEvent<HTMLElement>) => {
+        if (!bucket) return;
+
+        removeBucketDragPreview();
+        const preview = document.createElement('div');
+        preview.className = `bucket-drag-preview bucket-accent-${accentIndex}`;
+        preview.textContent = bucket.name;
+        document.body.appendChild(preview);
+        bucketDragPreviewRef.current = preview;
+
+        try {
+            event.dataTransfer.setData('text/plain', bucket.id);
+            event.dataTransfer.effectAllowed = 'move';
+        } catch {
+            removeBucketDragPreview();
+            return;
+        }
+
+        // A custom drag image is optional. Some WebView2 builds can reject it
+        // after a native drag has already started; keep the transfer and board
+        // state active so the browser's default preview remains a usable fallback.
+        onBucketDragStart?.(bucket.id);
+        try {
+            event.dataTransfer.setDragImage(preview, 28, 22);
+        } catch {
+            removeBucketDragPreview();
+        }
+    };
+
+    const endBucketDrag = () => {
+        removeBucketDragPreview();
+        onBucketDragEnd?.();
+    };
+
+    const getBucketDropTargetIndex = (event: DragEvent<HTMLElement>) => {
+        if (bucketDropIndex === undefined) return null;
+        const rect = event.currentTarget.getBoundingClientRect();
+        const midpoint = rect.left + rect.width / 2;
+        return event.clientX < midpoint ? bucketDropIndex : bucketDropIndex + 1;
+    };
 
     const drop = (event: DragEvent<HTMLElement>, targetIndex?: number) => {
         if (isBucketDragActive) return;
@@ -207,9 +264,16 @@ export function BucketColumn({
             ref={(element) => {
                 if (bucket) registerColumnRef?.(bucket.id, element);
             }}
-            className={`bucket-column bucket-accent-${accentIndex} drag-source-${dragSourceAccentIndex} column-stagger-${staggerIndex}${isOver ? ' drag-over' : ''}${isWarpHighlight ? ' warp-highlight' : ''}${nudgeFromLeftGap ? ' bucket-drop-nudge-left' : ''}${nudgeFromRightGap ? ' bucket-drop-nudge-right' : ''}${isBucketDropSettled ? ' bucket-drop-settled' : ''}${bucketDropSettleFrom === 'left' ? ' bucket-drop-settled-from-left' : ''}${bucketDropSettleFrom === 'right' ? ' bucket-drop-settled-from-right' : ''}`}
+            className={`bucket-column bucket-accent-${accentIndex} drag-source-${dragSourceAccentIndex} column-stagger-${staggerIndex}${isEntering ? ' bucket-entering' : ''}${isOver ? ' drag-over' : ''}${isBucketDragSource ? ' bucket-drag-source' : ''}${isWarpHighlight ? ' warp-highlight' : ''}${nudgeFromLeftGap ? ' bucket-drop-nudge-left' : ''}${nudgeFromRightGap ? ' bucket-drop-nudge-right' : ''}${isBucketDropSettled ? ' bucket-drop-settled' : ''}${bucketDropSettleFrom === 'left' ? ' bucket-drop-settled-from-left' : ''}${bucketDropSettleFrom === 'right' ? ' bucket-drop-settled-from-right' : ''}`}
             onDragOver={(event) => {
-                if (isBucketDragActive) return;
+                if (isBucketDragActive) {
+                    const targetIndex = getBucketDropTargetIndex(event);
+                    if (targetIndex === null || !onBucketDragHover) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = 'move';
+                    onBucketDragHover(targetIndex);
+                    return;
+                }
                 event.preventDefault();
                 event.dataTransfer.dropEffect = 'move';
                 setIsOver(true);
@@ -220,15 +284,29 @@ export function BucketColumn({
                     setIsOver(false);
                 }
             }}
-            onDrop={(event) => drop(event, tasks.length)}
+            onDrop={(event) => {
+                if (isBucketDragActive) {
+                    const targetIndex = getBucketDropTargetIndex(event);
+                    if (targetIndex === null || !onBucketDrop) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onBucketDrop(targetIndex);
+                    return;
+                }
+                drop(event, tasks.length);
+            }}
             onAnimationEnd={(event) => {
+                if (event.animationName === 'reveal-column-opacity') {
+                    setIsEntering(false);
+                    return;
+                }
                 if (!isBucketDropSettled) return;
                 if (event.animationName !== 'bucket-relocate-settle') return;
                 onBucketDropSettleEnd?.();
             }}
         >
             <header className="bucket-header">
-                <div>
+                <div className="bucket-title-block">
                     <h2>{bucketLabel}</h2>
                     <span>{tasks.length} task{tasks.length === 1 ? '' : 's'}</span>
                 </div>
@@ -260,22 +338,18 @@ export function BucketColumn({
                         )}
                         {bucket && (
                             <>
-                                <button
-                                    type="button"
+                                <span
                                     className="icon-button interaction-drag-handle drag-handle bucket-drag-handle"
                                     draggable
-                                    onDragStart={(event) => {
-                                        if (!bucket) return;
-                                        event.dataTransfer.setData('text/plain', bucket.id);
-                                        event.dataTransfer.effectAllowed = 'move';
-                                        onBucketDragStart?.(bucket.id);
-                                    }}
-                                    onDragEnd={() => onBucketDragEnd?.()}
+                                    onDragStart={startBucketDrag}
+                                    onDragEnd={endBucketDrag}
                                     title="Drag to move bucket"
                                     aria-label="Drag to move bucket"
+                                    role="img"
+                                    tabIndex={0}
                                 >
                                     ⠿
-                                </button>
+                                </span>
                                 <button
                                     type="button"
                                     className="icon-button bucket-move-button"
@@ -305,10 +379,22 @@ export function BucketColumn({
                                 >
                                     {bucket.pinned ? '📌' : '◯'}
                                 </button>
-                                <button type="button" className="icon-button" onClick={() => onRenameBucket?.(bucket)} title="Rename bucket">
+                                <button
+                                    type="button"
+                                    className="icon-button"
+                                    onClick={() => onRenameBucket?.(bucket)}
+                                    title="Rename bucket"
+                                    aria-label="Rename bucket"
+                                >
                                     ✎
                                 </button>
-                                <button type="button" className="icon-button danger" onClick={() => onDeleteBucket?.(bucket)} title="Delete bucket">
+                                <button
+                                    type="button"
+                                    className="icon-button danger"
+                                    onClick={() => onDeleteBucket?.(bucket)}
+                                    title="Delete bucket"
+                                    aria-label="Delete bucket"
+                                >
                                     ×
                                 </button>
                             </>

@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The main window can write plain text to the system clipboard.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "clipboard-manager:allow-write-text"
+  ]
+}

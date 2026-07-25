@@ -59,10 +59,7 @@ export function TaskCard({
   return (
     <article
       className={`task-card${task.completed ? ' completed' : ''}${isDragging ? ' is-dragging' : ''}${isSelected ? ' is-selected' : ''}${isFreshHighlight ? ' fresh-task-highlight' : ''}${isUploadedHighlight ? ' uploaded-task-highlight' : ''}${isDropSettled ? ' drop-settled' : ''}`}
-      draggable={draggable}
       onClick={onCardClick}
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
       onDragOver={onCardDragOver}
       onDrop={onCardDrop}
     >
@@ -85,7 +82,16 @@ export function TaskCard({
       {bucketName && <p className="task-meta">Bucket: {bucketName}</p>}
 
       <div className="task-card-actions">
-        <span className="drag-hint interaction-drag-handle drag-handle" title="Drag to move" aria-hidden="true">{dragLabel}</span>
+        <span
+          className="drag-hint interaction-drag-handle drag-handle"
+          title="Drag to move"
+          aria-hidden="true"
+          draggable={draggable}
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+        >
+          {dragLabel}
+        </span>
         {onMoveUp && (
           <button
             type="button"

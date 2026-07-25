@@ -1,4 +1,6 @@
 import type { PlannerTask } from '../types';
+import { isTauri } from '@tauri-apps/api/core';
+import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
 // Pure utility functions for task formatting (no side effects)
 
@@ -44,6 +46,15 @@ export const formatTaskForOrderedCopy = (task: PlannerTask, index: number): stri
 };
 
 /**
+ * Format a bucket as plain text for copying.
+ * Keeps the bucket label with the ordered task checklist without introducing
+ * a structured export format.
+ */
+export const formatBucketForOrderedCopy = (bucketName: string, tasks: PlannerTask[]): string => {
+    return [`Bucket: ${bucketName}`, ...tasks.map(formatTaskForOrderedCopy)].join('\n');
+};
+
+/**
  * Format a single task with bucket name for copying.
  * Example:
  *   [ ] Task title
@@ -68,6 +79,11 @@ export const formatTaskForSingleCopy = (task: PlannerTask, bucketName: string): 
  * Throws if both methods fail.
  */
 export const copyTextToClipboard = async (text: string): Promise<void> => {
+    if (isTauri()) {
+        await writeText(text);
+        return;
+    }
+
     try {
         if (navigator.clipboard?.writeText) {
             await navigator.clipboard.writeText(text);
@@ -84,10 +100,14 @@ export const copyTextToClipboard = async (text: string): Promise<void> => {
     textArea.style.left = '-9999px';
     textArea.style.top = '0';
     document.body.appendChild(textArea);
-    textArea.select();
 
-    const copied = document.execCommand('copy');
-    document.body.removeChild(textArea);
+    let copied = false;
+    try {
+        textArea.select();
+        copied = document.execCommand('copy');
+    } finally {
+        textArea.remove();
+    }
 
     if (!copied) {
         throw new Error('Clipboard copy failed');

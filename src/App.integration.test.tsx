@@ -443,6 +443,33 @@ const fireBoardDragOver = (target: HTMLElement, clientX: number, dataTransfer: D
     fireEvent(target, event);
 };
 
+const fireBoardDrop = (target: HTMLElement, clientX: number, dataTransfer: DataTransfer) => {
+    const event = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'clientX', { value: clientX });
+    Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+    fireEvent(target, event);
+};
+
+const mockBucketColumnGeometry = (column: HTMLElement) => {
+    vi.spyOn(column, 'getBoundingClientRect').mockReturnValue({
+        x: 100,
+        y: 120,
+        left: 100,
+        top: 120,
+        right: 300,
+        bottom: 620,
+        width: 200,
+        height: 500,
+        toJSON: () => ({}),
+    });
+};
+
+const readRenderedBucketOrder = (container: HTMLElement) => (
+    Array.from(container.querySelectorAll('.bucket-drag-handle')).map((handle) => (
+        handle.closest('.bucket-column')?.querySelector('h2')?.textContent
+    ))
+);
+
 const setupAnimationFrameQueue = () => {
     const callbacks: FrameRequestCallback[] = [];
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
@@ -594,7 +621,27 @@ describe('App integration', () => {
         expect(writeText).toHaveBeenCalledWith('[ ] Write launch summary\nBucket: To Do\nNote: Include blockers');
     });
 
-    it('copies all tasks in a bucket as an ordered checklist', async () => {
+    it('shows failure without a false success status when clipboard writing rejects', async () => {
+        const writeText = vi.fn().mockRejectedValue(new Error('clipboard unavailable'));
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+        Object.defineProperty(document, 'execCommand', {
+            value: vi.fn(() => false),
+            configurable: true,
+        });
+
+        render(<App />);
+        fireEvent.click(screen.getByRole('button', { name: 'Copy' }));
+
+        await waitFor(() => {
+            expect(screen.getByText(/Could not copy task/)).toBeInTheDocument();
+        });
+        expect(screen.queryByText(/Copied "Write launch summary"/)).not.toBeInTheDocument();
+    });
+
+    it('copies a bucket name with its ordered task checklist', async () => {
         const writeText = vi.fn().mockResolvedValue(undefined);
         Object.defineProperty(navigator, 'clipboard', {
             value: { writeText },
@@ -609,7 +656,7 @@ describe('App integration', () => {
             expect(writeText).toHaveBeenCalledTimes(1);
         });
 
-        expect(writeText).toHaveBeenCalledWith('1. [ ] Write launch summary\n   Note: Include blockers');
+        expect(writeText).toHaveBeenCalledWith('Bucket: To Do\n1. [ ] Write launch summary\n   Note: Include blockers');
     });
 
     it('pastes copied tasks into another bucket', async () => {
@@ -778,12 +825,12 @@ describe('App integration', () => {
         const taskCard = screen.getByRole('button', { name: 'Overflow task' }).closest('.task-card') as HTMLElement;
         const dataTransfer = createDragDataTransfer();
 
-        fireEvent.dragStart(taskCard, { dataTransfer });
+        const taskDragHandle = taskCard.querySelector('.drag-handle') as HTMLElement;
+        fireEvent.dragStart(taskDragHandle, { dataTransfer });
         await waitFor(() => expect(taskCard).toHaveClass('is-dragging'));
         fireBoardDragOver(frame, 592, dataTransfer);
 
         await waitFor(() => expect(animationFrameCallbacks.length).toBeGreaterThan(0));
-
         act(() => {
             animationFrameCallbacks.shift()?.(16);
         });
@@ -802,14 +849,16 @@ describe('App integration', () => {
         const frame = container.querySelector('.board-frame') as HTMLElement;
         mockBoardFrameGeometry(frame);
 
-        const bucketDragHandle = screen.getAllByRole('button', { name: 'Drag to move bucket' })[0];
+        const bucketDragHandle = screen.getAllByRole('img', { name: 'Drag to move bucket' })[0];
         const dataTransfer = createDragDataTransfer();
 
         fireEvent.dragStart(bucketDragHandle, { dataTransfer });
         await waitFor(() => expect(container.querySelector('.bucket-drop-slot.visible')).not.toBeNull());
+        expect(bucketDragHandle.closest('.bucket-column')).toHaveClass('bucket-drag-source');
         fireBoardDragOver(frame, 592, dataTransfer);
 
         await waitFor(() => expect(animationFrameCallbacks.length).toBeGreaterThan(0));
+        expect(container.querySelector('.bucket-drop-slot.active')).not.toBeNull();
 
         act(() => {
             animationFrameCallbacks.shift()?.(16);
@@ -818,6 +867,196 @@ describe('App integration', () => {
         expect(frame.scrollLeft).toBeGreaterThan(0);
 
         fireEvent.dragEnd(bucketDragHandle);
+        await waitFor(() => expect(container.querySelector('.bucket-drop-slot.visible')).toBeNull());
+        expect(bucketDragHandle.closest('.bucket-column')).not.toHaveClass('bucket-drag-source');
+        expect(document.querySelector('.bucket-drag-preview')).not.toBeInTheDocument();
+    });
+
+    it('keeps a later bucket wired through visible, active, and settled zero-footprint drop slots', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(overflowingBoardFixture);
+        const { container } = render(<App />);
+
+        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+        const laterBucketHandle = bucketHandles[8];
+        const sourceColumn = laterBucketHandle.closest('.bucket-column') as HTMLElement;
+        const beforeOrder = Array.from(container.querySelectorAll('.bucket-column h2')).map((heading) => heading.textContent);
+        const dataTransfer = createDragDataTransfer();
+
+        fireEvent.dragStart(laterBucketHandle, { dataTransfer });
+
+        await waitFor(() => expect(sourceColumn).toHaveClass('bucket-drag-source'));
+        expect(dataTransfer.setData).toHaveBeenCalledWith('text/plain', 'bucket-overflow-9');
+        expect(dataTransfer.effectAllowed).toBe('move');
+
+        const slots = Array.from(container.querySelectorAll('.bucket-drop-slot')) as HTMLElement[];
+        const wrappers = Array.from(container.querySelectorAll('.bucket-drop-slot-wrapper')) as HTMLElement[];
+        expect(wrappers).toHaveLength(slots.length);
+        expect(slots).toHaveLength(10);
+        expect(slots.every((slot) => slot.classList.contains('visible'))).toBe(true);
+        expect(Array.from(container.querySelectorAll('.bucket-column h2')).map((heading) => heading.textContent)).toEqual(beforeOrder);
+
+        fireEvent.dragOver(slots[2], { dataTransfer });
+        await waitFor(() => expect(slots[2]).toHaveClass('active'));
+        expect(sourceColumn).toHaveClass('bucket-drag-source');
+        expect(Array.from(container.querySelectorAll('.bucket-column h2')).map((heading) => heading.textContent)).toEqual(beforeOrder);
+
+        fireEvent.drop(slots[2], { dataTransfer });
+        await waitFor(() => expect(container.querySelector('.bucket-drop-slot.settled')).not.toBeNull());
+        expect(wrappers.every((wrapper) => wrapper.className === 'bucket-drop-slot-wrapper')).toBe(true);
+    });
+
+    it('moves bucket 1 after bucket 9 when the pointer crosses bucket 9 midpoint', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(overflowingBoardFixture);
+        const { container } = render(<App />);
+        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+        const sourceHandle = bucketHandles[0];
+        const targetColumn = bucketHandles[8].closest('.bucket-column') as HTMLElement;
+        const dataTransfer = createDragDataTransfer();
+        mockBucketColumnGeometry(targetColumn);
+
+        fireEvent.dragStart(sourceHandle, { dataTransfer });
+        await waitFor(() => expect(sourceHandle.closest('.bucket-column')).toHaveClass('bucket-drag-source'));
+
+        const slots = Array.from(container.querySelectorAll('.bucket-drop-slot')) as HTMLElement[];
+        fireBoardDragOver(targetColumn, 199, dataTransfer);
+        await waitFor(() => expect(slots[8]).toHaveClass('active'));
+
+        fireBoardDragOver(targetColumn, 201, dataTransfer);
+        await waitFor(() => {
+            expect(slots[8]).not.toHaveClass('active');
+            expect(slots[9]).toHaveClass('active');
+        });
+
+        fireBoardDrop(targetColumn, 201, dataTransfer);
+        await waitFor(() => {
+            expect(readRenderedBucketOrder(container)).toEqual([
+                'Bucket 2',
+                'Bucket 3',
+                'Bucket 4',
+                'Bucket 5',
+                'Bucket 6',
+                'Bucket 7',
+                'Bucket 8',
+                'Bucket 9',
+                'Bucket 1',
+            ]);
+        });
+    });
+
+    it('moves bucket 9 before bucket 2 using bucket 2 left-half target', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(overflowingBoardFixture);
+        const { container } = render(<App />);
+        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+        const sourceHandle = bucketHandles[8];
+        const targetColumn = bucketHandles[1].closest('.bucket-column') as HTMLElement;
+        const dataTransfer = createDragDataTransfer();
+        mockBucketColumnGeometry(targetColumn);
+
+        fireEvent.dragStart(sourceHandle, { dataTransfer });
+        await waitFor(() => expect(sourceHandle.closest('.bucket-column')).toHaveClass('bucket-drag-source'));
+        fireBoardDragOver(targetColumn, 101, dataTransfer);
+        const slots = Array.from(container.querySelectorAll('.bucket-drop-slot')) as HTMLElement[];
+        await waitFor(() => expect(slots[1]).toHaveClass('active'));
+
+        fireBoardDrop(targetColumn, 101, dataTransfer);
+        await waitFor(() => {
+            expect(readRenderedBucketOrder(container)).toEqual([
+                'Bucket 1',
+                'Bucket 9',
+                'Bucket 2',
+                'Bucket 3',
+                'Bucket 4',
+                'Bucket 5',
+                'Bucket 6',
+                'Bucket 7',
+                'Bucket 8',
+            ]);
+        });
+    });
+
+    it.each([
+        ['near', 3],
+        ['far', 0],
+    ])('uses the same bucket 5 left-half boundary for a %s source', async (_distance, sourceIndex) => {
+        localStorage.clear();
+        seedPlannerDataV2(overflowingBoardFixture);
+        const { container } = render(<App />);
+        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+        const sourceHandle = bucketHandles[sourceIndex];
+        const targetColumn = bucketHandles[4].closest('.bucket-column') as HTMLElement;
+        const dataTransfer = createDragDataTransfer();
+        mockBucketColumnGeometry(targetColumn);
+
+        fireEvent.dragStart(sourceHandle, { dataTransfer });
+        await waitFor(() => expect(sourceHandle.closest('.bucket-column')).toHaveClass('bucket-drag-source'));
+        fireBoardDragOver(targetColumn, 101, dataTransfer);
+
+        const slots = Array.from(container.querySelectorAll('.bucket-drop-slot')) as HTMLElement[];
+        await waitFor(() => expect(slots[4]).toHaveClass('active'));
+        expect(readRenderedBucketOrder(container)).toEqual([
+            'Bucket 1',
+            'Bucket 2',
+            'Bucket 3',
+            'Bucket 4',
+            'Bucket 5',
+            'Bucket 6',
+            'Bucket 7',
+            'Bucket 8',
+            'Bucket 9',
+        ]);
+
+        fireEvent.dragEnd(sourceHandle);
+    });
+
+    it('leaves bucket order unchanged when a bucket is dropped outside a valid target', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(overflowingBoardFixture);
+        const { container } = render(<App />);
+        const sourceHandle = screen.getAllByRole('img', { name: 'Drag to move bucket' })[4];
+        const beforeOrder = readRenderedBucketOrder(container);
+        const beforePersistedOrder = readRuntimePlannerData().buckets.map((bucket) => bucket.id);
+        const dataTransfer = createDragDataTransfer();
+
+        fireEvent.dragStart(sourceHandle, { dataTransfer });
+        await waitFor(() => expect(container.querySelector('.bucket-drop-slot.visible')).not.toBeNull());
+
+        const invalidDropEvent = new Event('drop', { bubbles: true, cancelable: true });
+        Object.defineProperty(invalidDropEvent, 'dataTransfer', { value: dataTransfer });
+        fireEvent(document.body, invalidDropEvent);
+
+        await waitFor(() => expect(container.querySelector('.bucket-drop-slot.visible')).toBeNull());
+        expect(readRenderedBucketOrder(container)).toEqual(beforeOrder);
+        expect(readRuntimePlannerData().buckets.map((bucket) => bucket.id)).toEqual(beforePersistedOrder);
+    });
+
+    it('keeps right and left arrow movement aligned with bucket insertion boundaries', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(overflowingBoardFixture);
+        const { container } = render(<App />);
+
+        fireEvent.click(screen.getAllByRole('button', { name: 'Move bucket right' })[0]);
+        await waitFor(() => {
+            expect(readRenderedBucketOrder(container).slice(0, 3)).toEqual([
+                'Bucket 2',
+                'Bucket 1',
+                'Bucket 3',
+            ]);
+        });
+
+        const movedBucketColumn = screen.getByRole('heading', { name: 'Bucket 1' }).closest('.bucket-column') as HTMLElement;
+        const moveLeftButton = movedBucketColumn.querySelector('[aria-label="Move bucket left"]') as HTMLButtonElement;
+        fireEvent.click(moveLeftButton);
+
+        await waitFor(() => {
+            expect(readRenderedBucketOrder(container).slice(0, 3)).toEqual([
+                'Bucket 1',
+                'Bucket 2',
+                'Bucket 3',
+            ]);
+        });
     });
 
     it('starts an empty browser storage with the v1 default board buckets', async () => {
@@ -960,6 +1199,9 @@ describe('App integration', () => {
 
         fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
 
+        expect(screen.getByRole('status')).toHaveTextContent(
+            /Export started — check your default Downloads folder for bsp-planner-\d{4}-\d{2}-\d{2}\.json\./,
+        );
         expect(createObjectUrl).toHaveBeenCalledTimes(1);
         expect(exportedBlob).not.toBeNull();
         const exported = JSON.parse(await exportedBlob!.text()) as PlannerDataV2;

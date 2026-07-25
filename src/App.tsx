@@ -13,6 +13,7 @@ import { savePlannerDataV2ToLocalStorage, loadPlannerDataV2FromLocalStorage } fr
 import { plannerReducerV2, type PlannerActionV2 } from './state/plannerReducerV2';
 import {
   copyTextToClipboard,
+  formatBucketForOrderedCopy,
   formatTaskChecklistLabel,
   formatTaskForOrderedCopy,
   formatTaskForSingleCopy,
@@ -254,6 +255,7 @@ export default function App() {
   const [hideRestoreUndoCard, setHideRestoreUndoCard] = useState(false);
   const [isRestoreUndoClosing, setIsRestoreUndoClosing] = useState(false);
   const [dataActionMessage, setDataActionMessage] = useState<string | null>(initialLoadResult.warning);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [templateMessage, setTemplateMessage] = useState<string | null>(null);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
   const [showSearchStatus, setShowSearchStatus] = useState(false);
@@ -336,6 +338,7 @@ export default function App() {
   };
 
   const clearActiveDrag = () => {
+    document.querySelectorAll('.bucket-drag-preview').forEach((preview) => preview.remove());
     setDraggedTaskId(null);
     setDraggedTaskIds([]);
     setDraggedBucketId(null);
@@ -388,6 +391,16 @@ export default function App() {
       setStatus('Could not save locally');
     }
   }, [state]);
+
+  useEffect(() => {
+    if (!exportNotice) return;
+
+    const timeoutId = window.setTimeout(() => {
+      setExportNotice(null);
+    }, 5000);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [exportNotice]);
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -977,7 +990,8 @@ export default function App() {
   const moveBucketByOffset = (bucketId: string, offset: -1 | 1) => {
     const sourceIndex = activeBuckets.findIndex((bucket) => bucket.id === bucketId);
     if (sourceIndex < 0) return;
-    const targetIndex = Math.max(0, Math.min(activeBuckets.length - 1, sourceIndex + offset));
+    const targetBoundary = sourceIndex + (offset < 0 ? -1 : 2);
+    const targetIndex = Math.max(0, Math.min(activeBuckets.length, targetBoundary));
     if (targetIndex === sourceIndex) return;
     dispatchPlanner({ type: 'MOVE_BUCKET', projectId: effectiveActiveProjectId, bucketId, targetIndex });
   };
@@ -1117,8 +1131,25 @@ export default function App() {
     const link = document.createElement('a');
     link.href = url;
     link.download = `bsp-planner-${new Date().toISOString().slice(0, 10)}.json`;
-    link.click();
-    URL.revokeObjectURL(url);
+    link.style.display = 'none';
+    document.body.appendChild(link);
+
+    try {
+      link.click();
+      setDataActionMessage(null);
+      setExportNotice(`Export started — check your default Downloads folder for ${link.download}.`);
+    } catch {
+      setExportNotice(null);
+      link.remove();
+      URL.revokeObjectURL(url);
+      setDataActionMessage('Export could not be started.');
+      return;
+    }
+
+    window.setTimeout(() => {
+      link.remove();
+      URL.revokeObjectURL(url);
+    }, 1000);
   };
 
   const readPlannerDataFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -1339,8 +1370,8 @@ export default function App() {
 
     void (async () => {
       try {
-        await copyTextToClipboard(tasks.map(formatTaskForOrderedCopy).join('\n'));
-        showTemporaryStatus(`Copied ${tasks.length} task${tasks.length === 1 ? '' : 's'} from ${bucketName}`);
+        await copyTextToClipboard(formatBucketForOrderedCopy(bucketName, tasks));
+        showTemporaryStatus(`Copied ${bucketName} and ${tasks.length} task${tasks.length === 1 ? '' : 's'}`);
       } catch {
         showTemporaryStatus(`Could not copy ${bucketName}`);
       }
@@ -1749,6 +1780,26 @@ export default function App() {
 
   return (
     <main className="app-shell">
+      {exportNotice && (
+        <div
+          className="app-notification-banner"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          <span>{exportNotice}</span>
+          <button
+            type="button"
+            className="icon-button app-notification-dismiss"
+            onClick={() => setExportNotice(null)}
+            aria-label="Dismiss export notification"
+            title="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       <header className="app-header">
         <div className="brand-block">
           <span className="brand-icon" aria-hidden="true">{APP_ICON_TEXT}</span>
@@ -2058,26 +2109,29 @@ export default function App() {
 
               {activeBuckets.map((bucket, index) => (
                 <Fragment key={bucket.id}>
-                  <div
-                    className={`bucket-drop-slot interaction-drop-slot interaction-bucket-drop-slot bucket-accent-${accentIndexFromBucket(bucket.id)}${draggedBucketId ? ' visible' : ''}${activeBucketDropIndex === index ? ' active' : ''}${settledBucketDropIndex === index ? ' settled' : ''}`}
-                    onDragOver={(event) => {
-                      if (!draggedBucketId) return;
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = 'move';
-                      setActiveBucketDropIndex(index);
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      dropBucketAt(index);
-                    }}
-                    aria-hidden="true"
-                  />
+                  <div className="bucket-drop-slot-wrapper">
+                    <div
+                      className={`bucket-drop-slot interaction-drop-slot interaction-bucket-drop-slot bucket-accent-${accentIndexFromBucket(bucket.id)}${draggedBucketId ? ' visible' : ''}${activeBucketDropIndex === index ? ' active' : ''}${settledBucketDropIndex === index ? ' settled' : ''}`}
+                      onDragOver={(event) => {
+                        if (!draggedBucketId) return;
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = 'move';
+                        setActiveBucketDropIndex(index);
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        dropBucketAt(index);
+                      }}
+                      aria-hidden="true"
+                    />
+                  </div>
                   <BucketColumn
                     columnIndex={index + 1}
                     bucket={bucket}
                     tasks={filteredTasksByBucket.get(bucket.id) ?? []}
                     draggedTaskId={draggedTaskId}
                     isBucketDragActive={Boolean(draggedBucketId)}
+                    isBucketDragSource={draggedBucketId === bucket.id}
                     nudgeFromLeftGap={Boolean(draggedBucketId) && activeBucketDropIndex === index}
                     nudgeFromRightGap={Boolean(draggedBucketId) && activeBucketDropIndex === index + 1}
                     isBucketDropSettled={settledBucketId === bucket.id}
@@ -2111,6 +2165,9 @@ export default function App() {
                     onBucketDragEnd={() => {
                       clearActiveDrag();
                     }}
+                    bucketDropIndex={index}
+                    onBucketDragHover={setActiveBucketDropIndex}
+                    onBucketDrop={dropBucketAt}
                     onMoveBucketByOffset={moveBucketByOffset}
                     canMoveBucketLeft={index > 0}
                     canMoveBucketRight={index < activeBuckets.length - 1}
@@ -2130,20 +2187,22 @@ export default function App() {
               ))}
 
               {activeBuckets.length > 0 && (
-                <div
-                  className={`bucket-drop-slot interaction-drop-slot interaction-bucket-drop-slot bucket-accent-${accentIndexFromBucket(activeBuckets[activeBuckets.length - 1]?.id ?? null)}${draggedBucketId ? ' visible' : ''}${activeBucketDropIndex === activeBuckets.length ? ' active' : ''}${settledBucketDropIndex === activeBuckets.length ? ' settled' : ''}`}
-                  onDragOver={(event) => {
-                    if (!draggedBucketId) return;
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = 'move';
-                    setActiveBucketDropIndex(activeBuckets.length);
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    dropBucketAt(activeBuckets.length);
-                  }}
-                  aria-hidden="true"
-                />
+                <div className="bucket-drop-slot-wrapper">
+                  <div
+                    className={`bucket-drop-slot interaction-drop-slot interaction-bucket-drop-slot bucket-accent-${accentIndexFromBucket(activeBuckets[activeBuckets.length - 1]?.id ?? null)}${draggedBucketId ? ' visible' : ''}${activeBucketDropIndex === activeBuckets.length ? ' active' : ''}${settledBucketDropIndex === activeBuckets.length ? ' settled' : ''}`}
+                    onDragOver={(event) => {
+                      if (!draggedBucketId) return;
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = 'move';
+                      setActiveBucketDropIndex(activeBuckets.length);
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      dropBucketAt(activeBuckets.length);
+                    }}
+                    aria-hidden="true"
+                  />
+                </div>
               )}
 
               <section className="bucket-column board-add-bucket-column" aria-label="Board add bucket">

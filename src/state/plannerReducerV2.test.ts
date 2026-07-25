@@ -119,6 +119,21 @@ const baseState = (): PlannerDataV2 => ({
   templateDefinitions: [],
 });
 
+const stateWithPinnedBuckets = (): PlannerDataV2 => ({
+  ...baseState(),
+  buckets: [
+    { ...bucket('bucket-p1', 'project-a'), pinned: true },
+    { ...bucket('bucket-p2', 'project-a'), pinned: true },
+    bucket('bucket-u1', 'project-a'),
+    bucket('bucket-u2', 'project-a'),
+    bucket('bucket-b', 'project-b'),
+  ],
+  tasks: [
+    task('task-a', 'project-a', 'bucket-u1'),
+    task('task-b', 'project-b', 'bucket-b'),
+  ],
+});
+
 const stateWithTemplate = (): PlannerDataV2 => ({
   ...baseState(),
   templates: [template('template-a', 'Launch'), template('template-b', 'Ops')],
@@ -215,6 +230,75 @@ describe('plannerReducerV2', () => {
     });
 
     expect(result.current.state.projects.map((item) => item.id)).toEqual(['project-b']);
+  });
+
+  it('places a pinned bucket at the pinned-group end when dropped beyond unpinned buckets', () => {
+    const state = stateWithPinnedBuckets();
+    const next = plannerReducerV2(state, {
+      type: 'MOVE_BUCKET',
+      projectId: 'project-a',
+      bucketId: 'bucket-p1',
+      targetIndex: 4,
+    });
+
+    expect(next.buckets.filter((item) => item.projectId === 'project-a').map((item) => item.id)).toEqual([
+      'bucket-p2',
+      'bucket-p1',
+      'bucket-u1',
+      'bucket-u2',
+    ]);
+    expect(next.buckets.find((item) => item.id === 'bucket-p1')?.pinned).toBe(true);
+  });
+
+  it('reorders a pinned bucket only within the pinned group', () => {
+    const state = stateWithPinnedBuckets();
+    const next = plannerReducerV2(state, {
+      type: 'MOVE_BUCKET',
+      projectId: 'project-a',
+      bucketId: 'bucket-p2',
+      targetIndex: 0,
+    });
+
+    expect(next.buckets.filter((item) => item.projectId === 'project-a').map((item) => item.id)).toEqual([
+      'bucket-p2',
+      'bucket-p1',
+      'bucket-u1',
+      'bucket-u2',
+    ]);
+    expect(next.buckets.filter((item) => item.projectId === 'project-a' && !item.pinned).map((item) => item.id)).toEqual([
+      'bucket-u1',
+      'bucket-u2',
+    ]);
+  });
+
+  it('keeps an unpinned bucket unpinned at the start of its group when dragged toward pinned buckets', () => {
+    const state = stateWithPinnedBuckets();
+    const next = plannerReducerV2(state, {
+      type: 'MOVE_BUCKET',
+      projectId: 'project-a',
+      bucketId: 'bucket-u2',
+      targetIndex: 0,
+    });
+
+    expect(next.buckets.filter((item) => item.projectId === 'project-a').map((item) => item.id)).toEqual([
+      'bucket-p1',
+      'bucket-p2',
+      'bucket-u2',
+      'bucket-u1',
+    ]);
+    expect(next.buckets.find((item) => item.id === 'bucket-u2')?.pinned).toBe(false);
+  });
+
+  it('returns the same state for invalid or missing bucket moves', () => {
+    const state = stateWithPinnedBuckets();
+    const invalidActions: PlannerActionV2[] = [
+      { type: 'MOVE_BUCKET', projectId: 'project-a', bucketId: 'missing-bucket', targetIndex: 0 },
+      { type: 'MOVE_BUCKET', projectId: 'project-a', bucketId: 'bucket-b', targetIndex: 0 },
+    ];
+
+    invalidActions.forEach((action) => {
+      expect(plannerReducerV2(state, action)).toBe(state);
+    });
   });
 
   it('scopes bucket deletion and task unassignment to one project', () => {

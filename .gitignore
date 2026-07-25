@@ -13,6 +13,8 @@ yarn-error.log*
 pnpm-debug.log*
 .idea
 .cache
+src-tauri/target/
+*.exe
 Thumbs.db
 bucket-planner-*.json
 bsp-planner-*.json
