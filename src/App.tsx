@@ -9,6 +9,12 @@ import type { TaskDraft } from './types';
 import type { BucketTemplate, BucketTemplateDefinition, BucketV2 as Bucket, PlannerDataV2 as PlannerData, PlannerTaskV2 as PlannerTask, Project } from './types/v2';
 import { usePlannerHistory } from './hooks/usePlannerHistory';
 import { usePlannerKeyboardShortcuts } from './hooks/usePlannerKeyboardShortcuts';
+import {
+  BOARD_ZOOM_PERCENTAGES,
+  loadBoardZoomPreference,
+  saveBoardZoomPreference,
+  stepBoardZoom,
+} from './services/boardZoom';
 import { savePlannerDataV2ToLocalStorage, loadPlannerDataV2FromLocalStorage } from './services/plannerPersistence';
 import { plannerReducerV2, type PlannerActionV2 } from './state/plannerReducerV2';
 import {
@@ -208,11 +214,8 @@ interface RenameDialogState {
 
 type ThemeMode = 'light' | 'dark';
 type VisualMode = 'calm' | 'balanced' | 'energetic';
-const BOARD_ZOOM_STORAGE_KEY = 'planner-buckets:board-zoom-index';
 const THEME_STORAGE_KEY = 'planner-buckets:theme';
 const VISUAL_MODE_STORAGE_KEY = 'planner-buckets:visual-mode';
-const MIN_BOARD_ZOOM_INDEX = 0;
-const MAX_BOARD_ZOOM_INDEX = 4;
 const APP_NAME = 'Planner Buckets';
 const APP_BANNER = 'Local-First Task Planning';
 const APP_ICON_TEXT = 'PB';
@@ -270,13 +273,7 @@ export default function App() {
     }
     return 'balanced';
   });
-  const [boardZoomIndex, setBoardZoomIndex] = useState(() => {
-    const stored = Number(localStorage.getItem(BOARD_ZOOM_STORAGE_KEY));
-    if (Number.isInteger(stored) && stored >= MIN_BOARD_ZOOM_INDEX && stored <= MAX_BOARD_ZOOM_INDEX) {
-      return stored;
-    }
-    return 3;
-  });
+  const [boardZoomPercent, setBoardZoomPercent] = useState(() => loadBoardZoomPreference());
   const [isSidepanelOpen, setIsSidepanelOpen] = useState(false);
   const [isSidepanelLocked, setIsSidepanelLocked] = useState(false);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
@@ -413,8 +410,8 @@ export default function App() {
   }, [visualMode]);
 
   useEffect(() => {
-    localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, String(boardZoomIndex));
-  }, [boardZoomIndex]);
+    saveBoardZoomPreference(boardZoomPercent);
+  }, [boardZoomPercent]);
 
   useEffect(() => {
     return () => {
@@ -1883,7 +1880,7 @@ export default function App() {
 
       <div className={`workspace-layout ${isSidepanelOpen ? 'sidepanel-open' : 'sidepanel-closed'}`}>
         <section
-          className={`board-stage board-zoom-${boardZoomIndex}`}
+          className={`board-stage board-zoom-${boardZoomPercent}`}
           aria-label="Planner board"
         >
           <div className="board-stage-toolbar">
@@ -1891,17 +1888,28 @@ export default function App() {
               <button
                 type="button"
                 className="zoom-button"
-                onClick={() => setBoardZoomIndex((current) => Math.max(MIN_BOARD_ZOOM_INDEX, current - 1))}
-                disabled={boardZoomIndex === MIN_BOARD_ZOOM_INDEX}
+                onClick={() => setBoardZoomPercent((current) => stepBoardZoom(current, -1))}
+                disabled={boardZoomPercent === BOARD_ZOOM_PERCENTAGES[0]}
+                aria-label="Zoom board out"
+                title="Zoom board out"
               >
                 -
               </button>
-              <span className="zoom-status">View</span>
+              <span
+                className="zoom-status"
+                aria-label="Board zoom level"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                {boardZoomPercent}%
+              </span>
               <button
                 type="button"
                 className="zoom-button"
-                onClick={() => setBoardZoomIndex((current) => Math.min(MAX_BOARD_ZOOM_INDEX, current + 1))}
-                disabled={boardZoomIndex === MAX_BOARD_ZOOM_INDEX}
+                onClick={() => setBoardZoomPercent((current) => stepBoardZoom(current, 1))}
+                disabled={boardZoomPercent === BOARD_ZOOM_PERCENTAGES[BOARD_ZOOM_PERCENTAGES.length - 1]}
+                aria-label="Zoom board in"
+                title="Zoom board in"
               >
                 +
               </button>
@@ -2062,6 +2070,9 @@ export default function App() {
           <div
             ref={boardFrameRef}
             className="board-frame"
+            role="region"
+            aria-label={`${activeProject.name} board viewport`}
+            tabIndex={0}
             onDragEnterCapture={updateBoardDragPointer}
             onDragOverCapture={updateBoardDragPointer}
             onDragLeaveCapture={handleBoardDragLeave}

@@ -69,7 +69,7 @@
   --task-insert-slot-height: calc(14px / var(--density-scale));
   --task-insert-slot-height-active: calc(18px / var(--density-scale));
   --mode-wash: transparent;
-  --board-zoom: 1.08;
+  --board-zoom: 0.9;
   --anim-controls-slide: calc(300ms * var(--motion-multiplier));
   --panel-peek-width: 74px;
   --scrollbar-size: 11px;
@@ -623,24 +623,40 @@ button {
   transform: rotate(180deg);
 }
 
-.board-stage.board-zoom-0 {
-  --board-zoom: 0.88;
+.board-stage.board-zoom-70 {
+  --board-zoom: 0.7;
 }
 
-.board-stage.board-zoom-1 {
-  --board-zoom: 0.96;
+.board-stage.board-zoom-75 {
+  --board-zoom: 0.75;
 }
 
-.board-stage.board-zoom-2 {
-  --board-zoom: 1.04;
+.board-stage.board-zoom-80 {
+  --board-zoom: 0.8;
 }
 
-.board-stage.board-zoom-3 {
-  --board-zoom: 1.08;
+.board-stage.board-zoom-85 {
+  --board-zoom: 0.85;
 }
 
-.board-stage.board-zoom-4 {
-  --board-zoom: 1.14;
+.board-stage.board-zoom-90 {
+  --board-zoom: 0.9;
+}
+
+.board-stage.board-zoom-95 {
+  --board-zoom: 0.95;
+}
+
+.board-stage.board-zoom-100 {
+  --board-zoom: 1;
+}
+
+.board-stage.board-zoom-105 {
+  --board-zoom: 1.05;
+}
+
+.board-stage.board-zoom-110 {
+  --board-zoom: 1.1;
 }
 
 .board-frame {
@@ -655,8 +671,12 @@ button {
   padding: calc(14px * var(--space-scale));
   height: 100%;
   min-height: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: auto;
+}
+
+.board-frame:focus-visible {
+  outline: 3px solid color-mix(in oklab, var(--primary) 36%, transparent);
+  outline-offset: 2px;
 }
 
 h1,

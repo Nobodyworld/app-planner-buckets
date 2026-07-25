@@ -2,6 +2,11 @@ import { act } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
+import {
+    BOARD_ZOOM_PERCENTAGES,
+    BOARD_ZOOM_STORAGE_KEY,
+    LEGACY_BOARD_ZOOM_STORAGE_KEY,
+} from './services/boardZoom';
 import type { PlannerData } from './types';
 import type { PlannerDataV2 } from './types/v2';
 import { PLANNER_DATA_V2_VERSION } from './types/v2';
@@ -450,15 +455,19 @@ const fireBoardDrop = (target: HTMLElement, clientX: number, dataTransfer: DataT
     fireEvent(target, event);
 };
 
-const mockBucketColumnGeometry = (column: HTMLElement) => {
+const mockBucketColumnGeometry = (
+    column: HTMLElement,
+    left = 100,
+    width = 200,
+) => {
     vi.spyOn(column, 'getBoundingClientRect').mockReturnValue({
-        x: 100,
+        x: left,
         y: 120,
-        left: 100,
+        left,
         top: 120,
-        right: 300,
+        right: left + width,
         bottom: 620,
-        width: 200,
+        width,
         height: 500,
         toJSON: () => ({}),
     });
@@ -524,6 +533,24 @@ const overflowingBoardFixture: PlannerDataV2 = {
     templateDefinitions: [],
 };
 
+const tallBoardFixture: PlannerDataV2 = {
+    ...overflowingBoardFixture,
+    tasks: Array.from({ length: 24 }, (_, index) => ({
+        id: `task-tall-${index + 1}`,
+        projectId: 'project-overflow',
+        title: `Tall board task ${index + 1}`,
+        description: '',
+        bucketId: 'bucket-overflow-1',
+        priority: 0,
+        resourceTags: [],
+        pinned: false,
+        completed: false,
+        archivedAt: null,
+        createdAt: `2026-02-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+        updatedAt: `2026-02-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+    })),
+};
+
 describe('App integration', () => {
     beforeEach(() => {
         localStorage.clear();
@@ -533,6 +560,81 @@ describe('App integration', () => {
     afterEach(() => {
         vi.useRealTimers();
         vi.restoreAllMocks();
+    });
+
+    it('defaults to a visible persisted 90% board zoom', async () => {
+        const { container } = render(<App />);
+
+        expect(screen.getByLabelText('Board zoom level')).toHaveTextContent('90%');
+        expect(container.querySelector('.board-stage')).toHaveClass('board-zoom-90');
+        await waitFor(() => {
+            expect(localStorage.getItem(BOARD_ZOOM_STORAGE_KEY)).toBe('90');
+        });
+    });
+
+    it.each(BOARD_ZOOM_PERCENTAGES)('loads supported board zoom %i%%', (percent) => {
+        localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, String(percent));
+
+        const { container } = render(<App />);
+
+        expect(screen.getByLabelText('Board zoom level')).toHaveTextContent(`${percent}%`);
+        expect(container.querySelector('.board-stage')).toHaveClass(`board-zoom-${percent}`);
+    });
+
+    it('migrates a legacy zoom index without overwriting the legacy key', async () => {
+        localStorage.setItem(LEGACY_BOARD_ZOOM_STORAGE_KEY, '2');
+
+        render(<App />);
+
+        expect(screen.getByLabelText('Board zoom level')).toHaveTextContent('105%');
+        await waitFor(() => {
+            expect(localStorage.getItem(BOARD_ZOOM_STORAGE_KEY)).toBe('105');
+        });
+        expect(localStorage.getItem(LEGACY_BOARD_ZOOM_STORAGE_KEY)).toBe('2');
+    });
+
+    it('persists zoom steps, preserves horizontal position, and disables endpoint controls', async () => {
+        localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, '70');
+        const firstRender = render(<App />);
+        const { container } = firstRender;
+        const frame = container.querySelector('.board-frame') as HTMLElement;
+        Object.defineProperty(frame, 'scrollLeft', {
+            value: 320,
+            writable: true,
+            configurable: true,
+        });
+
+        expect(screen.getByRole('button', { name: 'Zoom board out' })).toBeDisabled();
+        const zoomIn = screen.getByRole('button', { name: 'Zoom board in' });
+        fireEvent.click(zoomIn);
+
+        expect(screen.getByLabelText('Board zoom level')).toHaveTextContent('75%');
+        expect(container.querySelector('.board-frame')).toBe(frame);
+        expect(frame.scrollLeft).toBe(320);
+        await waitFor(() => {
+            expect(localStorage.getItem(BOARD_ZOOM_STORAGE_KEY)).toBe('75');
+        });
+
+        firstRender.unmount();
+        localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, '110');
+        render(<App />);
+        expect(screen.getByRole('button', { name: 'Zoom board in' })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Zoom board out' })).toBeEnabled();
+    });
+
+    it('keeps a tall board and its entry controls inside the focusable closed-sidepanel viewport', () => {
+        localStorage.clear();
+        seedPlannerDataV2(tallBoardFixture);
+        const { container } = render(<App />);
+
+        expect(container.querySelector('.workspace-layout')).toHaveClass('sidepanel-closed');
+        const frame = screen.getByRole('region', { name: 'Overflow board viewport' });
+        expect(frame).toHaveAttribute('tabindex', '0');
+        frame.focus();
+        expect(frame).toHaveFocus();
+        expect(frame).toContainElement(screen.getByRole('button', { name: 'Tall board task 24' }));
+        expect(frame).toContainElement(screen.getAllByRole('button', { name: '+ Add task' })[0]);
+        expect(frame.querySelector('.task-list')).not.toBeNull();
     });
 
     it('auto-opens the sidepanel when hovering the toggle while unlocked', () => {
@@ -813,32 +915,37 @@ describe('App integration', () => {
         expect(screen.getByRole('heading', { name: 'Board Added Bucket' })).toBeInTheDocument();
     });
 
-    it('horizontally autoscrolls the board when dragging a task near the right edge', async () => {
-        localStorage.clear();
-        seedPlannerDataV2(overflowingBoardFixture);
-        const animationFrameCallbacks = setupAnimationFrameQueue();
-        const { container } = render(<App />);
+    it.each([70, 110] as const)(
+        'horizontally autoscrolls the board when dragging a task near the right edge at %i%% zoom',
+        async (percent) => {
+            localStorage.clear();
+            seedPlannerDataV2(overflowingBoardFixture);
+            localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, String(percent));
+            const animationFrameCallbacks = setupAnimationFrameQueue();
+            const { container } = render(<App />);
 
-        const frame = container.querySelector('.board-frame') as HTMLElement;
-        mockBoardFrameGeometry(frame);
+            expect(container.querySelector('.board-stage')).toHaveClass(`board-zoom-${percent}`);
+            const frame = container.querySelector('.board-frame') as HTMLElement;
+            mockBoardFrameGeometry(frame);
 
-        const taskCard = screen.getByRole('button', { name: 'Overflow task' }).closest('.task-card') as HTMLElement;
-        const dataTransfer = createDragDataTransfer();
+            const taskCard = screen.getByRole('button', { name: 'Overflow task' }).closest('.task-card') as HTMLElement;
+            const dataTransfer = createDragDataTransfer();
 
-        const taskDragHandle = taskCard.querySelector('.drag-handle') as HTMLElement;
-        fireEvent.dragStart(taskDragHandle, { dataTransfer });
-        await waitFor(() => expect(taskCard).toHaveClass('is-dragging'));
-        fireBoardDragOver(frame, 592, dataTransfer);
+            const taskDragHandle = taskCard.querySelector('.drag-handle') as HTMLElement;
+            fireEvent.dragStart(taskDragHandle, { dataTransfer });
+            await waitFor(() => expect(taskCard).toHaveClass('is-dragging'));
+            fireBoardDragOver(frame, 592, dataTransfer);
 
-        await waitFor(() => expect(animationFrameCallbacks.length).toBeGreaterThan(0));
-        act(() => {
-            animationFrameCallbacks.shift()?.(16);
-        });
+            await waitFor(() => expect(animationFrameCallbacks.length).toBeGreaterThan(0));
+            act(() => {
+                animationFrameCallbacks.shift()?.(16);
+            });
 
-        expect(frame.scrollLeft).toBeGreaterThan(0);
+            expect(frame.scrollLeft).toBeGreaterThan(0);
 
-        fireEvent.dragEnd(taskCard);
-    });
+            fireEvent.dragEnd(taskCard);
+        },
+    );
 
     it('horizontally autoscrolls the board when dragging a bucket near the right edge', async () => {
         localStorage.clear();
@@ -906,44 +1013,67 @@ describe('App integration', () => {
         expect(wrappers.every((wrapper) => wrapper.className === 'bucket-drop-slot-wrapper')).toBe(true);
     });
 
-    it('moves bucket 1 after bucket 9 when the pointer crosses bucket 9 midpoint', async () => {
-        localStorage.clear();
-        seedPlannerDataV2(overflowingBoardFixture);
-        const { container } = render(<App />);
-        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
-        const sourceHandle = bucketHandles[0];
-        const targetColumn = bucketHandles[8].closest('.bucket-column') as HTMLElement;
-        const dataTransfer = createDragDataTransfer();
-        mockBucketColumnGeometry(targetColumn);
+    it.each([
+        {
+            zoomPercent: 70,
+            visualColumnWidth: 140,
+            beforeMidpointX: 169,
+            afterMidpointX: 171,
+        },
+        {
+            zoomPercent: 110,
+            visualColumnWidth: 220,
+            beforeMidpointX: 209,
+            afterMidpointX: 211,
+        },
+    ] as const)(
+        'moves bucket 1 after bucket 9 using viewport midpoint coordinates at $zoomPercent% zoom',
+        async ({
+            zoomPercent,
+            visualColumnWidth,
+            beforeMidpointX,
+            afterMidpointX,
+        }) => {
+            localStorage.clear();
+            seedPlannerDataV2(overflowingBoardFixture);
+            localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, String(zoomPercent));
+            const { container } = render(<App />);
+            expect(container.querySelector('.board-stage')).toHaveClass(`board-zoom-${zoomPercent}`);
+            const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+            const sourceHandle = bucketHandles[0];
+            const targetColumn = bucketHandles[8].closest('.bucket-column') as HTMLElement;
+            const dataTransfer = createDragDataTransfer();
+            mockBucketColumnGeometry(targetColumn, 100, visualColumnWidth);
 
-        fireEvent.dragStart(sourceHandle, { dataTransfer });
-        await waitFor(() => expect(sourceHandle.closest('.bucket-column')).toHaveClass('bucket-drag-source'));
+            fireEvent.dragStart(sourceHandle, { dataTransfer });
+            await waitFor(() => expect(sourceHandle.closest('.bucket-column')).toHaveClass('bucket-drag-source'));
 
-        const slots = Array.from(container.querySelectorAll('.bucket-drop-slot')) as HTMLElement[];
-        fireBoardDragOver(targetColumn, 199, dataTransfer);
-        await waitFor(() => expect(slots[8]).toHaveClass('active'));
+            const slots = Array.from(container.querySelectorAll('.bucket-drop-slot')) as HTMLElement[];
+            fireBoardDragOver(targetColumn, beforeMidpointX, dataTransfer);
+            await waitFor(() => expect(slots[8]).toHaveClass('active'));
 
-        fireBoardDragOver(targetColumn, 201, dataTransfer);
-        await waitFor(() => {
-            expect(slots[8]).not.toHaveClass('active');
-            expect(slots[9]).toHaveClass('active');
-        });
+            fireBoardDragOver(targetColumn, afterMidpointX, dataTransfer);
+            await waitFor(() => {
+                expect(slots[8]).not.toHaveClass('active');
+                expect(slots[9]).toHaveClass('active');
+            });
 
-        fireBoardDrop(targetColumn, 201, dataTransfer);
-        await waitFor(() => {
-            expect(readRenderedBucketOrder(container)).toEqual([
-                'Bucket 2',
-                'Bucket 3',
-                'Bucket 4',
-                'Bucket 5',
-                'Bucket 6',
-                'Bucket 7',
-                'Bucket 8',
-                'Bucket 9',
-                'Bucket 1',
-            ]);
-        });
-    });
+            fireBoardDrop(targetColumn, afterMidpointX, dataTransfer);
+            await waitFor(() => {
+                expect(readRenderedBucketOrder(container)).toEqual([
+                    'Bucket 2',
+                    'Bucket 3',
+                    'Bucket 4',
+                    'Bucket 5',
+                    'Bucket 6',
+                    'Bucket 7',
+                    'Bucket 8',
+                    'Bucket 9',
+                    'Bucket 1',
+                ]);
+            });
+        },
+    );
 
     it('moves bucket 9 before bucket 2 using bucket 2 left-half target', async () => {
         localStorage.clear();
