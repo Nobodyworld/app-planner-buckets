@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent as ReactDragEvent, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
 import { BucketColumn } from './components/BucketColumn';
 import { ProjectBoard } from './components/ProjectBoard';
+import { SelectionActions } from './components/SelectionControls';
 import { TaskEditor } from './components/TaskEditor';
 import { PlannerSidepanel } from './components/sidepanel/PlannerSidepanel';
 import { getGlobalBucketView } from './selectors/globalBucketView';
@@ -16,6 +17,14 @@ import {
   stepBoardZoom,
 } from './services/boardZoom';
 import { resolveQuickAdd } from './services/quickAdd';
+import {
+  getBucketTaskSelectionState,
+  getSelectedTaskCount,
+  getSelectedTasksInVisibleOrder,
+  pruneTaskSelection,
+  setVisibleBucketTaskSelection,
+  toggleTaskSelection,
+} from './services/plannerSelection';
 import { savePlannerDataV2ToLocalStorage, loadPlannerDataV2FromLocalStorage } from './services/plannerPersistence';
 import { plannerReducerV2, type PlannerActionV2 } from './state/plannerReducerV2';
 import {
@@ -282,8 +291,7 @@ export default function App() {
   const [isSidepanelLocked, setIsSidepanelLocked] = useState(false);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [draggedTaskIds, setDraggedTaskIds] = useState<string[]>([]);
-  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
-  const [selectionAnchorTaskId, setSelectionAnchorTaskId] = useState<string | null>(null);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(() => new Set());
   const [taskClipboard, setTaskClipboard] = useState<Array<Pick<PlannerTask, 'title' | 'description'>>>([]);
   const [activePasteBucketId, setActivePasteBucketId] = useState<string | null>(null);
   const [draggedBucketId, setDraggedBucketId] = useState<string | null>(null);
@@ -544,37 +552,26 @@ export default function App() {
     return filtered;
   }, [tasksByBucket, searchQuery, showCompleted]);
 
-  const selectedTaskIdSet = useMemo(() => new Set(selectedTaskIds), [selectedTaskIds]);
-
-  const orderedVisibleTaskIds = useMemo(() => {
-    const ordered: string[] = [];
-    (filteredTasksByBucket.get(null) ?? []).forEach((task) => ordered.push(task.id));
+  const orderedVisibleTasks = useMemo(() => {
+    const ordered: PlannerTask[] = [];
+    ordered.push(...(filteredTasksByBucket.get(null) ?? []));
     activeBuckets.forEach((bucket) => {
-      (filteredTasksByBucket.get(bucket.id) ?? []).forEach((task) => ordered.push(task.id));
+      ordered.push(...(filteredTasksByBucket.get(bucket.id) ?? []));
     });
     return ordered;
   }, [activeBuckets, filteredTasksByBucket]);
 
-  const visibleTaskIndexById = useMemo(() => {
-    const map = new Map<string, number>();
-    orderedVisibleTaskIds.forEach((taskId, index) => {
-      map.set(taskId, index);
-    });
-    return map;
-  }, [orderedVisibleTaskIds]);
+  const visibleTaskIdSet = useMemo(
+    () => new Set(orderedVisibleTasks.map((task) => task.id)),
+    [orderedVisibleTasks],
+  );
 
   useEffect(() => {
-    const activeTaskIdSet = new Set(
-      activeTasks
-        .filter((task) => !task.archivedAt)
-        .map((task) => task.id),
-    );
-
-    setSelectedTaskIds((current) => current.filter((taskId) => activeTaskIdSet.has(taskId)));
-    if (selectionAnchorTaskId && !activeTaskIdSet.has(selectionAnchorTaskId)) {
-      setSelectionAnchorTaskId(null);
-    }
-  }, [activeTasks, selectionAnchorTaskId]);
+    setSelectedTaskIds((current) => {
+      const nextSelection = pruneTaskSelection(current, visibleTaskIdSet);
+      return nextSelection.size === current.size ? current : nextSelection;
+    });
+  }, [visibleTaskIdSet]);
 
   const stats = useMemo(() => {
     const archived = activeTasks.filter((task) => task.archivedAt !== null).length;
@@ -626,8 +623,7 @@ export default function App() {
     if (!project) return;
     setActiveProjectId(projectId);
     setQuickTaskProjectTarget(project);
-    setSelectedTaskIds([]);
-    setSelectionAnchorTaskId(null);
+    setSelectedTaskIds(new Set());
     setActivePasteBucketId(null);
     setEditor(null);
     setSearchQuery('');
@@ -980,8 +976,7 @@ export default function App() {
 
     setActiveProjectId(activationProjectId);
     if (activationProjectId !== effectiveActiveProjectId) {
-      setSelectedTaskIds([]);
-      setSelectionAnchorTaskId(null);
+      setSelectedTaskIds(new Set());
       setActivePasteBucketId(null);
       setEditor(null);
       setSearchQuery('');
@@ -1112,8 +1107,7 @@ export default function App() {
           setQuickTaskBucketId(null);
         }
       }
-      setSelectedTaskIds([]);
-      setSelectionAnchorTaskId(null);
+      setSelectedTaskIds(new Set());
       setActivePasteBucketId(null);
     }
     setConfirmDialog(null);
@@ -1267,6 +1261,7 @@ export default function App() {
     setIsRestoreUndoClosing(false);
     dispatchPlanner({ type: 'REPLACE_DATA', data: pendingRestoreData });
     setActiveProjectId(restoredProjectId);
+    setSelectedTaskIds(new Set());
     setQuickTaskProjectId(restoredProjectId || null);
     setQuickTaskProjectName(restoredProject?.name ?? '');
     setQuickTaskBucketId(null);
@@ -1302,6 +1297,7 @@ export default function App() {
     );
     dispatchPlanner({ type: 'REPLACE_DATA', data: lastRestoreBackup });
     setActiveProjectId(restoredProjectId);
+    setSelectedTaskIds(new Set());
     setQuickTaskProjectId(restoredProjectId || null);
     setQuickTaskProjectName(restoredProject?.name ?? '');
     setQuickTaskBucketId(null);
@@ -1365,58 +1361,17 @@ export default function App() {
     scheduleSearchStatusHide(1600);
   };
 
-  const applyTaskSelection = (
-    taskId: string,
-    options: {
-      shift: boolean;
-      toggle: boolean;
-    },
-  ) => {
-    if (options.shift && selectionAnchorTaskId) {
-      const anchorIndex = visibleTaskIndexById.get(selectionAnchorTaskId);
-      const targetIndex = visibleTaskIndexById.get(taskId);
-      if (anchorIndex !== undefined && targetIndex !== undefined) {
-        const [start, end] = anchorIndex < targetIndex
-          ? [anchorIndex, targetIndex]
-          : [targetIndex, anchorIndex];
-        const rangeIds = orderedVisibleTaskIds.slice(start, end + 1);
-        setSelectedTaskIds((current) => {
-          if (options.toggle) {
-            return Array.from(new Set([...current, ...rangeIds]));
-          }
-          return rangeIds;
-        });
-        setActivePasteBucketId(activeTasks.find((task) => task.id === taskId)?.bucketId ?? null);
-        return;
-      }
-    }
-
-    if (options.toggle) {
-      setSelectedTaskIds((current) => {
-        const exists = current.includes(taskId);
-        if (exists) {
-          return current.filter((item) => item !== taskId);
-        }
-        return [...current, taskId];
-      });
-      setSelectionAnchorTaskId(taskId);
-      setActivePasteBucketId(activeTasks.find((task) => task.id === taskId)?.bucketId ?? null);
-      return;
-    }
-
-    setSelectedTaskIds([taskId]);
-    setSelectionAnchorTaskId(taskId);
-    setActivePasteBucketId(activeTasks.find((task) => task.id === taskId)?.bucketId ?? null);
+  const setTaskSelection = (taskId: string, shouldSelect: boolean) => {
+    setSelectedTaskIds((current) => {
+      if (current.has(taskId) === shouldSelect) return current;
+      return toggleTaskSelection(current, taskId);
+    });
   };
 
-  const handleTaskCardSelection = (taskId: string, event: ReactMouseEvent<HTMLElement>) => {
-    const target = event.target as HTMLElement;
-    if (target.closest('button, input, label, textarea, select, a')) return;
-
-    applyTaskSelection(taskId, {
-      shift: event.shiftKey,
-      toggle: event.ctrlKey || event.metaKey,
-    });
+  const setBucketSelection = (bucketId: string | null, shouldSelect: boolean) => {
+    setSelectedTaskIds((current) => (
+      setVisibleBucketTaskSelection(current, orderedVisibleTasks, bucketId, shouldSelect)
+    ));
   };
 
   const setClipboardFromTasks = (tasks: PlannerTask[]) => {
@@ -1430,8 +1385,6 @@ export default function App() {
 
   const copyTaskToClipboard = (task: PlannerTask, bucketName: string) => {
     setClipboardFromTasks([task]);
-    setSelectedTaskIds([task.id]);
-    setSelectionAnchorTaskId(task.id);
     setActivePasteBucketId(task.bucketId);
 
     void (async () => {
@@ -1454,8 +1407,6 @@ export default function App() {
     }
 
     setClipboardFromTasks(tasks);
-    setSelectedTaskIds(tasks.map((task) => task.id));
-    setSelectionAnchorTaskId(tasks[0]?.id ?? null);
     setActivePasteBucketId(bucketId);
 
     void (async () => {
@@ -1469,9 +1420,7 @@ export default function App() {
   };
 
   const copySelectedTasks = () => {
-    const tasks = activeTasks.filter(
-      (task) => selectedTaskIdSet.has(task.id) && !task.archivedAt,
-    );
+    const tasks = getSelectedTasksInVisibleOrder(selectedTaskIds, orderedVisibleTasks);
     if (tasks.length === 0) {
       showTemporaryStatus('Select tasks to copy first');
       return;
@@ -1514,8 +1463,6 @@ export default function App() {
   const handleTaskDragStart = (taskId: string, taskIds: string[]) => {
     setDraggedTaskId(taskId);
     setDraggedTaskIds(taskIds);
-    setSelectedTaskIds(taskIds);
-    setSelectionAnchorTaskId(taskId);
     setActivePasteBucketId(activeTasks.find((task) => task.id === taskId)?.bucketId ?? null);
   };
 
@@ -1550,34 +1497,6 @@ export default function App() {
     });
   };
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"]')) return;
-
-      const withMeta = event.ctrlKey || event.metaKey;
-      if (!withMeta) return;
-
-      const key = event.key.toLowerCase();
-
-      if (key === 'c' && selectedTaskIds.length > 0) {
-        event.preventDefault();
-        copySelectedTasks();
-        return;
-      }
-
-      if (key === 'v' && taskClipboard.length > 0) {
-        event.preventDefault();
-        pasteTasksIntoBucket(activePasteBucketId);
-      }
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-    };
-  }, [activePasteBucketId, activeTasks, selectedTaskIds.length, taskClipboard, selectedTaskIdSet]);
-
   // Keyboard shortcuts for undo/redo, copy/paste
   usePlannerKeyboardShortcuts({
     onUndo: () => {
@@ -1591,7 +1510,7 @@ export default function App() {
       showTemporaryStatus('Redo');
     },
     onCopy: () => {
-      if (selectedTaskIds.length === 0) return;
+      if (selectedTaskIds.size === 0) return;
       copySelectedTasks();
     },
     onPaste: () => {
@@ -2003,15 +1922,11 @@ export default function App() {
               </button>
             </div>
             <div className="board-actions" role="group" aria-label="Board actions">
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={copySelectedTasks}
-                disabled={selectedTaskIds.length === 0}
-                title={selectedTaskIds.length === 0 ? 'Select task cards to copy' : 'Copy selected tasks'}
-              >
-                Copy selected ({selectedTaskIds.length})
-              </button>
+              <SelectionActions
+                selectedCount={getSelectedTaskCount(selectedTaskIds)}
+                onCopySelected={copySelectedTasks}
+                onClearAll={() => setSelectedTaskIds(new Set())}
+              />
               <button
                 type="button"
                 className="icon-button"
@@ -2191,8 +2106,10 @@ export default function App() {
                 onToggleTaskPin={(taskId) => dispatchPlanner({ type: 'TOGGLE_TASK_PIN', projectId: effectiveActiveProjectId, taskId, updatedAt: now() })}
                 onMoveTask={(taskId, bucketId, targetIndex) => moveTasksToBucket([taskId], bucketId, targetIndex)}
                 onMoveTasks={moveTasksToBucket}
-                selectedTaskIds={selectedTaskIdSet}
-                onSelectTask={handleTaskCardSelection}
+                selectedTaskIds={selectedTaskIds}
+                bucketSelectionState={getBucketTaskSelectionState(selectedTaskIds, orderedVisibleTasks, null)}
+                onTaskSelectionChange={setTaskSelection}
+                onBucketSelectionChange={(shouldSelect) => setBucketSelection(null, shouldSelect)}
                 onPasteIntoBucket={pasteTasksIntoBucket}
                 canPasteIntoBucket={taskClipboard.length > 0}
                 onDragStart={handleTaskDragStart}
@@ -2252,8 +2169,10 @@ export default function App() {
                     onToggleTaskPin={(taskId) => dispatchPlanner({ type: 'TOGGLE_TASK_PIN', projectId: effectiveActiveProjectId, taskId, updatedAt: now() })}
                     onMoveTask={(taskId, bucketId, targetIndex) => moveTasksToBucket([taskId], bucketId, targetIndex)}
                     onMoveTasks={moveTasksToBucket}
-                    selectedTaskIds={selectedTaskIdSet}
-                    onSelectTask={handleTaskCardSelection}
+                    selectedTaskIds={selectedTaskIds}
+                    bucketSelectionState={getBucketTaskSelectionState(selectedTaskIds, orderedVisibleTasks, bucket.id)}
+                    onTaskSelectionChange={setTaskSelection}
+                    onBucketSelectionChange={(shouldSelect) => setBucketSelection(bucket.id, shouldSelect)}
                     onPasteIntoBucket={pasteTasksIntoBucket}
                     canPasteIntoBucket={taskClipboard.length > 0}
                     onDragStart={handleTaskDragStart}

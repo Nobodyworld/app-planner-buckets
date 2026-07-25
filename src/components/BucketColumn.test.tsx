@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import type { BucketTaskSelectionState } from '../services/plannerSelection';
 import type { BucketV2, PlannerTaskV2 } from '../types/v2';
 import { BucketColumn } from './BucketColumn';
 
@@ -40,6 +41,9 @@ interface RenderBucketOptions {
     canPasteIntoBucket?: boolean;
     canMoveBucketLeft?: boolean;
     canMoveBucketRight?: boolean;
+    withSelection?: boolean;
+    selectedTaskIds?: ReadonlySet<string>;
+    bucketSelectionState?: BucketTaskSelectionState;
 }
 
 const renderBucket = (
@@ -59,6 +63,8 @@ const renderBucket = (
     const onToggleBucketPin = vi.fn();
     const onRenameBucket = vi.fn();
     const onDeleteBucket = vi.fn();
+    const onTaskSelectionChange = vi.fn();
+    const onBucketSelectionChange = vi.fn();
     let currentOptions = options;
     const renderColumn = (nextOptions: RenderBucketOptions) => (
         <BucketColumn
@@ -82,6 +88,10 @@ const renderBucket = (
             onToggleTaskPin={vi.fn()}
             onDragStart={vi.fn()}
             onDragEnd={vi.fn()}
+            selectedTaskIds={nextOptions.selectedTaskIds}
+            bucketSelectionState={nextOptions.bucketSelectionState}
+            onTaskSelectionChange={nextOptions.withSelection ? onTaskSelectionChange : undefined}
+            onBucketSelectionChange={nextOptions.withSelection ? onBucketSelectionChange : undefined}
             onBucketDragStart={onBucketDragStart}
             onBucketDragEnd={onBucketDragEnd}
             onBucketDragHover={onBucketDragHover}
@@ -116,6 +126,8 @@ const renderBucket = (
         onToggleBucketPin,
         onRenameBucket,
         onDeleteBucket,
+        onTaskSelectionChange,
+        onBucketSelectionChange,
     };
 };
 
@@ -298,7 +310,7 @@ describe('BucketColumn header actions', () => {
             ['img', 'Drag to move bucket'],
             ['button', 'Move bucket left'],
             ['button', 'Move bucket right'],
-            ['button', pinned ? 'Unpin bucket' : 'Pin bucket to left group'],
+            ['button', pinned ? `Unpin ${bucket.name}` : `Pin ${bucket.name} to the left group`],
             ['button', 'Rename bucket'],
             ['button', 'Delete bucket'],
         ] as const;
@@ -316,6 +328,71 @@ describe('BucketColumn header actions', () => {
             control.focus();
             expect(control).toHaveFocus();
         }
+    });
+
+    it('renders named bucket and task selection as keyboard-operable, controlled checkboxes', () => {
+        const bucket = makeBucket();
+        const task = makeTask();
+        const result = renderBucket(bucket, false, false, {
+            tasks: [task],
+            withSelection: true,
+            selectedTaskIds: new Set(),
+            bucketSelectionState: 'unchecked',
+        });
+
+        const bucketCheckbox = screen.getByRole('checkbox', {
+            name: `Select all visible tasks in ${bucket.name}`,
+        });
+        const taskCheckbox = screen.getByRole('checkbox', {
+            name: `Select "${task.title}" for bulk actions`,
+        });
+
+        bucketCheckbox.focus();
+        expect(bucketCheckbox).toHaveFocus();
+        fireEvent.click(bucketCheckbox);
+        expect(result.onBucketSelectionChange).toHaveBeenCalledWith(true);
+
+        fireEvent.click(taskCheckbox);
+        expect(result.onTaskSelectionChange).toHaveBeenCalledWith(task.id, true);
+
+        result.rerenderBucket({
+            selectedTaskIds: new Set([task.id]),
+            bucketSelectionState: 'indeterminate',
+        });
+        expect(bucketCheckbox).toHaveProperty('indeterminate', true);
+        expect(screen.getByRole('checkbox', {
+            name: `Deselect "${task.title}" for bulk actions`,
+        })).toBeChecked();
+    });
+
+    it('uses the Unassigned label and disables bucket selection when no tasks are visible', () => {
+        const onBucketSelectionChange = vi.fn();
+        render(
+            <BucketColumn
+                columnIndex={0}
+                bucket={null}
+                tasks={[]}
+                draggedTaskId={null}
+                draggedAccentIndex={null}
+                highlightedTaskId={null}
+                onQuickAddTask={vi.fn()}
+                onEditTask={vi.fn()}
+                onDeleteTask={vi.fn()}
+                onToggleTask={vi.fn()}
+                onMoveTask={vi.fn()}
+                onToggleTaskPin={vi.fn()}
+                onDragStart={vi.fn()}
+                onDragEnd={vi.fn()}
+                onBucketSelectionChange={onBucketSelectionChange}
+            />,
+        );
+
+        const checkbox = screen.getByRole('checkbox', {
+            name: 'No visible tasks to select in Unassigned',
+        });
+        expect(checkbox).toBeDisabled();
+        fireEvent.click(checkbox);
+        expect(onBucketSelectionChange).not.toHaveBeenCalled();
     });
 
     it.each([

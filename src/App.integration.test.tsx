@@ -1,5 +1,5 @@
 import { act } from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import {
@@ -8,7 +8,7 @@ import {
     LEGACY_BOARD_ZOOM_STORAGE_KEY,
 } from './services/boardZoom';
 import type { PlannerData } from './types';
-import type { PlannerDataV2 } from './types/v2';
+import type { PlannerDataV2, PlannerTaskV2 } from './types/v2';
 import { PLANNER_DATA_V2_VERSION } from './types/v2';
 import { isValidPlannerDataV2 } from './types/validators';
 
@@ -133,6 +133,50 @@ const plannerV2Fixture: PlannerDataV2 = {
     ],
     templates: [],
     templateDefinitions: [],
+};
+
+const makeSelectionTask = (
+    id: string,
+    title: string,
+    bucketId: string | null,
+    completed = false,
+): PlannerTaskV2 => ({
+    id,
+    projectId: 'project-b',
+    title,
+    description: '',
+    bucketId,
+    priority: 0,
+    resourceTags: [],
+    pinned: false,
+    completed,
+    archivedAt: null,
+    createdAt: '2026-01-03T00:00:00.000Z',
+    updatedAt: '2026-01-03T00:00:00.000Z',
+});
+
+const selectionFixture: PlannerDataV2 = {
+    ...plannerV2Fixture,
+    buckets: [
+        ...plannerV2Fixture.buckets,
+        {
+            id: 'bucket-beta-second',
+            projectId: 'project-b',
+            name: 'Second Bucket',
+            description: '',
+            templateDefinitionId: null,
+            priority: 0,
+            pinned: false,
+            createdAt: '2026-01-03T00:00:00.000Z',
+            updatedAt: '2026-01-03T00:00:00.000Z',
+        },
+    ],
+    tasks: [
+        makeSelectionTask('task-beta-second', 'Second bucket task', 'bucket-beta-second'),
+        ...plannerV2Fixture.tasks,
+        makeSelectionTask('task-beta-unassigned', 'Beta unassigned', null),
+        makeSelectionTask('task-beta-completed', 'Completed beta task', 'bucket-beta', true),
+    ],
 };
 
 const plannerV2TemplateFixture: PlannerDataV2 = {
@@ -823,6 +867,326 @@ describe('App integration', () => {
         const pastedTask = saved.tasks.find((task) => task.id !== 'task-1');
         expect(pastedTask?.title).toBe('Write launch summary');
         expect(pastedTask?.bucketId).toBeNull();
+    });
+
+    it('manages explicit task, named-bucket, and Unassigned selection independently from completion', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        const { container } = render(<App />);
+
+        const copySelected = screen.getByRole('button', { name: 'Copy selected' });
+        const clearAll = screen.getByRole('button', { name: 'Clear all' });
+        expect(screen.getByText('0 selected')).toHaveAttribute('aria-live', 'polite');
+        expect(copySelected).toBeDisabled();
+        expect(clearAll).toBeDisabled();
+
+        const betaTaskSelection = screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        });
+        betaTaskSelection.focus();
+        expect(betaTaskSelection).toHaveFocus();
+        fireEvent.click(betaTaskSelection);
+
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Deselect "Beta task" for bulk actions',
+        })).toBeChecked();
+
+        const betaBucketSelection = screen.getByRole('checkbox', {
+            name: 'Select all visible tasks in Beta Bucket',
+        });
+        await waitFor(() => expect(betaBucketSelection).toHaveProperty('indeterminate', true));
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Mark "Beta task" complete',
+        }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Deselect "Beta task" for bulk actions',
+        })).toBeChecked();
+        expect(screen.getByRole('button', { name: 'Beta task' }).closest('.task-card')).toHaveClass('completed');
+
+        fireEvent.click(betaBucketSelection);
+        expect(screen.getByText('2 selected')).toBeInTheDocument();
+        const checkedBucketSelection = screen.getByRole('checkbox', {
+            name: 'Deselect all visible tasks in Beta Bucket',
+        });
+        expect(checkedBucketSelection).toBeChecked();
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Deselect "Completed beta task" for bulk actions',
+        }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        await waitFor(() => expect(screen.getByRole('checkbox', {
+            name: 'Select all visible tasks in Beta Bucket',
+        })).toHaveProperty('indeterminate', true));
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select all visible tasks in Beta Bucket',
+        }));
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Deselect all visible tasks in Beta Bucket',
+        }));
+        expect(screen.getByText('0 selected')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select all visible tasks in Unassigned',
+        }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Deselect "Beta unassigned" for bulk actions',
+        })).toBeChecked();
+
+        fireEvent.click(clearAll);
+        expect(screen.getByText('0 selected')).toBeInTheDocument();
+        expect(copySelected).toBeDisabled();
+        expect(clearAll).toBeDisabled();
+        expect(container.querySelectorAll('.task-card.is-selected')).toHaveLength(0);
+    });
+
+    it('keeps task and bucket copy independent while copying selected tasks in visible board order', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Second bucket task" for bulk actions',
+        }));
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta unassigned" for bulk actions',
+        }));
+        expect(screen.getByText('3 selected')).toBeInTheDocument();
+
+        const betaTaskCard = screen.getByRole('button', { name: 'Beta task' }).closest('.task-card') as HTMLElement;
+        fireEvent.click(within(betaTaskCard).getByRole('button', { name: 'Copy' }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+        expect(writeText).toHaveBeenLastCalledWith('[ ] Beta task\nBucket: Beta Bucket');
+        expect(screen.getByText('3 selected')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy all tasks in Beta Bucket' }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+        expect(writeText).toHaveBeenLastCalledWith(
+            'Bucket: Beta Bucket\n1. [ ] Beta task\n2. [x] Completed beta task',
+        );
+        expect(screen.getByText('3 selected')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
+        await waitFor(() => {
+            const pastedUnassignedTitles = readRuntimePlannerData().tasks
+                .filter((task) => task.projectId === 'project-b' && task.bucketId === null)
+                .map((task) => task.title);
+            expect(pastedUnassignedTitles).toEqual([
+                'Beta unassigned',
+                'Beta task',
+                'Completed beta task',
+            ]);
+        });
+        expect(screen.getByText('3 selected')).toBeInTheDocument();
+        expect(screen.getAllByRole('checkbox', {
+            name: /Deselect ".+" for bulk actions/,
+        })).toHaveLength(3);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy selected' }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(3));
+        expect(writeText).toHaveBeenLastCalledWith(
+            '1. [ ] Beta unassigned\n2. [ ] Beta task\n3. [ ] Second bucket task',
+        );
+        expect(screen.getByText('3 selected')).toBeInTheDocument();
+        expect(screen.getAllByRole('checkbox', {
+            name: /Deselect ".+" for bulk actions/,
+        })).toHaveLength(3);
+    });
+
+    it('prunes selection after search, completed filtering, and project switches without restoring hidden selections', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Second bucket task" for bulk actions',
+        }));
+        expect(screen.getByText('2 selected')).toBeInTheDocument();
+
+        fireEvent.change(screen.getByLabelText('Search tasks'), {
+            target: { value: 'Beta' },
+        });
+        await waitFor(() => expect(screen.getByText('1 selected')).toBeInTheDocument());
+
+        fireEvent.change(screen.getByLabelText('Search tasks'), {
+            target: { value: '' },
+        });
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Select "Second bucket task" for bulk actions',
+        })).not.toBeChecked();
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Completed beta task" for bulk actions',
+        }));
+        expect(screen.getByText('2 selected')).toBeInTheDocument();
+        expandSidebarSection('Archive / View Options');
+        fireEvent.click(screen.getByRole('checkbox', { name: 'Show completed' }));
+        await waitFor(() => expect(screen.getByText('1 selected')).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: 'Completed beta task' })).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Show completed again' }));
+        expect(screen.getByRole('checkbox', {
+            name: 'Select "Completed beta task" for bulk actions',
+        })).not.toBeChecked();
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+
+        expandSidebarSection('Projects');
+        fireEvent.change(screen.getByLabelText('Active project'), {
+            target: { value: 'project-a' },
+        });
+        expect(screen.getByText('0 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Select "Alpha task" for bulk actions',
+        })).toBeInTheDocument();
+    });
+
+    it('keeps selection through a visible move and prunes it after delete and archive', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        const betaTaskCard = screen.getByRole('button', { name: 'Beta task' }).closest('.task-card') as HTMLElement;
+        fireEvent.click(within(betaTaskCard).getByRole('button', { name: 'Move task down' }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Deselect "Beta task" for bulk actions',
+        })).toBeChecked();
+
+        fireEvent.click(within(betaTaskCard).getByRole('button', { name: 'Delete' }));
+        fireEvent.click(screen.getAllByRole('button', { name: 'Delete task' }).at(-1)!);
+        await waitFor(() => expect(screen.getByText('0 selected')).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: 'Beta task' })).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Completed beta task" for bulk actions',
+        }));
+        expandSidebarSection('Archive / View Options');
+        fireEvent.click(screen.getByRole('button', { name: 'Archive completed (1)' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm archive completed tasks' }));
+        await waitFor(() => expect(screen.getByText('0 selected')).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: 'Completed beta task' })).not.toBeInTheDocument();
+    });
+
+    it('clears selection on restore even when restored data reuses a selected task id', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+
+        expandSidebarSection('Data');
+        const restoreFile = new File([JSON.stringify(plannerV2Fixture)], 'selection-restore.json', {
+            type: 'application/json',
+        });
+        fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
+            target: { files: [restoreFile] },
+        });
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm restore' })).toBeInTheDocument());
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm restore' }));
+
+        await waitFor(() => expect(screen.getByText('0 selected')).toBeInTheDocument());
+        expect(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        })).not.toBeChecked();
+    });
+
+    it('preserves selected multi-drag and unselected single-drag without mutating explicit selection', () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Completed beta task" for bulk actions',
+        }));
+
+        const taskCard = screen.getByRole('button', { name: 'Beta task' }).closest('.task-card') as HTMLElement;
+        const dragHandle = taskCard.querySelector('.drag-handle') as HTMLElement;
+        const selectedTransfer = createDragDataTransfer();
+        fireEvent.dragStart(dragHandle, { dataTransfer: selectedTransfer });
+
+        expect(JSON.parse(selectedTransfer.getData('application/x-planner-task-ids'))).toEqual([
+            'task-beta',
+            'task-beta-completed',
+        ]);
+        expect(screen.getByText('2 selected')).toBeInTheDocument();
+        fireEvent.dragEnd(dragHandle);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+        const unselectedTransfer = createDragDataTransfer();
+        fireEvent.dragStart(dragHandle, { dataTransfer: unselectedTransfer });
+
+        expect(JSON.parse(unselectedTransfer.getData('application/x-planner-task-ids'))).toEqual([
+            'task-beta',
+        ]);
+        expect(screen.getByText('0 selected')).toBeInTheDocument();
+    });
+
+    it('routes copy, paste, undo, and redo shortcuts through exactly one transaction path', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        const originalTaskCount = selectionFixture.tasks.length;
+
+        fireEvent.keyDown(window, { key: 'c', ctrlKey: true });
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+        expect(writeText).toHaveBeenLastCalledWith('1. [ ] Beta task');
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+
+        fireEvent.keyDown(window, { key: 'v', ctrlKey: true });
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(originalTaskCount + 1);
+        });
+        expect(readRuntimePlannerData().tasks.filter((task) => (
+            task.projectId === 'project-b'
+            && task.bucketId === null
+            && task.title === 'Beta task'
+        ))).toHaveLength(1);
+
+        fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(originalTaskCount);
+        });
+
+        fireEvent.keyDown(window, { key: 'y', ctrlKey: true });
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(originalTaskCount + 1);
+        });
+        expect(writeText).toHaveBeenCalledTimes(1);
     });
 
     it('supports undo and redo keyboard shortcuts for planner actions', async () => {

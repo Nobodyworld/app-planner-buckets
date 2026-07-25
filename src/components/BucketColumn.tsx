@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import type { BucketTaskSelectionState } from '../services/plannerSelection';
 import type { BucketV2 as Bucket, PlannerTaskV2 as PlannerTask } from '../types/v2';
+import { BucketPinButton, BucketSelectionCheckbox } from './SelectionControls';
 import { TaskCard } from './TaskCard';
 
 interface BucketColumnProps {
@@ -30,7 +32,9 @@ interface BucketColumnProps {
     onDragStart: (taskId: string, taskIds: string[]) => void;
     onDragEnd: () => void;
     selectedTaskIds?: ReadonlySet<string>;
-    onSelectTask?: (taskId: string, event: ReactMouseEvent<HTMLElement>) => void;
+    bucketSelectionState?: BucketTaskSelectionState;
+    onTaskSelectionChange?: (taskId: string, selected: boolean) => void;
+    onBucketSelectionChange?: (selected: boolean) => void;
     onPasteIntoBucket?: (bucketId: string | null) => void;
     canPasteIntoBucket?: boolean;
     onBucketDragStart?: (bucketId: string) => void;
@@ -84,7 +88,9 @@ export function BucketColumn({
     onDragStart,
     onDragEnd,
     selectedTaskIds,
-    onSelectTask,
+    bucketSelectionState = 'unchecked',
+    onTaskSelectionChange,
+    onBucketSelectionChange,
     onPasteIntoBucket,
     canPasteIntoBucket = false,
     onBucketDragStart,
@@ -306,6 +312,14 @@ export function BucketColumn({
             }}
         >
             <header className="bucket-header">
+                {onBucketSelectionChange && (
+                    <BucketSelectionCheckbox
+                        bucketName={bucket?.name ?? null}
+                        state={bucketSelectionState}
+                        onChange={onBucketSelectionChange}
+                        disabled={tasks.length === 0}
+                    />
+                )}
                 <div className="bucket-title-block">
                     <h2>{bucketLabel}</h2>
                     <span>{tasks.length} task{tasks.length === 1 ? '' : 's'}</span>
@@ -370,15 +384,11 @@ export function BucketColumn({
                                 >
                                     →
                                 </button>
-                                <button
-                                    type="button"
-                                    className={`icon-button${bucket.pinned ? ' is-pinned' : ''}`}
-                                    onClick={() => onToggleBucketPin?.(bucket)}
-                                    title={bucket.pinned ? 'Unpin bucket' : 'Pin bucket to left group'}
-                                    aria-label={bucket.pinned ? 'Unpin bucket' : 'Pin bucket to left group'}
-                                >
-                                    {bucket.pinned ? '📌' : '◯'}
-                                </button>
+                                <BucketPinButton
+                                    bucketName={bucket.name}
+                                    pinned={bucket.pinned}
+                                    onToggle={() => onToggleBucketPin?.(bucket)}
+                                />
                                 <button
                                     type="button"
                                     className="icon-button"
@@ -438,7 +448,9 @@ export function BucketColumn({
                             canMoveDown={index < tasks.length - 1}
                             onCopy={onCopyTask ? () => onCopyTask(task, bucketLabel) : undefined}
                             isSelected={selectedTaskIds?.has(task.id) ?? false}
-                            onCardClick={onSelectTask ? (event) => onSelectTask(task.id, event) : undefined}
+                            onSelectionChange={onTaskSelectionChange
+                                ? (selected) => onTaskSelectionChange(task.id, selected)
+                                : undefined}
                             onCardDragOver={(event) => {
                                 if (isBucketDragActive) return;
                                 event.preventDefault();

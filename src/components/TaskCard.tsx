@@ -1,5 +1,6 @@
-import type { DragEvent, MouseEvent } from 'react';
+import type { DragEvent } from 'react';
 import type { PlannerTask } from '../types';
+import { TaskSelectionCheckbox } from './SelectionControls';
 
 interface TaskCardProps {
   task: PlannerTask;
@@ -22,7 +23,7 @@ interface TaskCardProps {
   isFreshHighlight?: boolean;
   isUploadedHighlight?: boolean;
   isDropSettled?: boolean;
-  onCardClick?: (event: MouseEvent<HTMLElement>) => void;
+  onSelectionChange?: (selected: boolean) => void;
   onCardDragOver?: (event: DragEvent<HTMLElement>) => void;
   onCardDrop?: (event: DragEvent<HTMLElement>) => void;
   onDragStart: (event: DragEvent<HTMLElement>) => void;
@@ -50,7 +51,7 @@ export function TaskCard({
   isFreshHighlight = false,
   isUploadedHighlight = false,
   isDropSettled = false,
-  onCardClick,
+  onSelectionChange,
   onCardDragOver,
   onCardDrop,
   onDragStart,
@@ -59,11 +60,17 @@ export function TaskCard({
   return (
     <article
       className={`task-card${task.completed ? ' completed' : ''}${isDragging ? ' is-dragging' : ''}${isSelected ? ' is-selected' : ''}${isFreshHighlight ? ' fresh-task-highlight' : ''}${isUploadedHighlight ? ' uploaded-task-highlight' : ''}${isDropSettled ? ' drop-settled' : ''}`}
-      onClick={onCardClick}
       onDragOver={onCardDragOver}
       onDrop={onCardDrop}
     >
       <div className="task-card-header">
+        {onSelectionChange && (
+          <TaskSelectionCheckbox
+            taskTitle={task.title}
+            selected={isSelected}
+            onChange={onSelectionChange}
+          />
+        )}
         <label className="completion-control" title="Mark complete">
           <input
             type="checkbox"
