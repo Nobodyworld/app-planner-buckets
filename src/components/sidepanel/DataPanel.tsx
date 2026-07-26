@@ -1,15 +1,28 @@
 import type { ChangeEvent, RefObject } from 'react';
 import type { BucketV2 as Bucket } from '../../types/v2';
 
+export interface ProjectImportSourceOption {
+    projectId: string;
+    label: string;
+}
+
+export type ProjectImportDestinationKind = 'new' | 'existing' | null;
+
 export interface DataPanelProps {
     embedded?: boolean;
-    uploadInputRef: RefObject<HTMLInputElement>;
+    projectImportInputRef: RefObject<HTMLInputElement>;
     restoreInputRef: RefObject<HTMLInputElement>;
-    uploadConfirmRef: RefObject<HTMLDivElement>;
+    projectImportConfirmRef: RefObject<HTMLDivElement>;
     restoreConfirmRef: RefObject<HTMLDivElement>;
     exportScopeMenuRef: RefObject<HTMLDivElement>;
-    hasPendingUploadData: boolean;
-    pendingUploadSummary: string;
+    hasPendingProjectImport: boolean;
+    projectImportSourceKindLabel: string;
+    projectImportSourceOptions: ProjectImportSourceOption[];
+    selectedProjectImportSourceId: string;
+    projectImportDestinationKind: ProjectImportDestinationKind;
+    selectedProjectImportDestinationId: string;
+    projectImportDestinationProjects: ProjectImportSourceOption[];
+    canConfirmProjectImport: boolean;
     hasPendingRestoreData: boolean;
     pendingRestoreSummary: string;
     hasLastRestoreBackup: boolean;
@@ -22,8 +35,11 @@ export interface DataPanelProps {
     activeProjectName: string;
     activeBuckets: Bucket[];
     openAdvancedSectionsInTests: boolean;
-    onConfirmUploadData: () => void;
-    onCancelUploadData: () => void;
+    onConfirmProjectImport: () => void;
+    onCancelProjectImport: () => void;
+    onProjectImportSourceChange: (projectId: string) => void;
+    onProjectImportDestinationKindChange: (kind: Exclude<ProjectImportDestinationKind, null>) => void;
+    onProjectImportDestinationChange: (projectId: string) => void;
     onToggleExportScopeMenu: () => void;
     onSelectExportScope: (scope: string) => void;
     onExportData: () => void;
@@ -32,18 +48,24 @@ export interface DataPanelProps {
     onDismissRestoreUndoCard: () => void;
     onUndoRestoreData: () => void;
     onRestoreFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
-    onUploadFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
+    onProjectImportFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
 }
 
 export function DataPanel({
     embedded = false,
-    uploadInputRef,
+    projectImportInputRef,
     restoreInputRef,
-    uploadConfirmRef,
+    projectImportConfirmRef,
     restoreConfirmRef,
     exportScopeMenuRef,
-    hasPendingUploadData,
-    pendingUploadSummary,
+    hasPendingProjectImport,
+    projectImportSourceKindLabel,
+    projectImportSourceOptions,
+    selectedProjectImportSourceId,
+    projectImportDestinationKind,
+    selectedProjectImportDestinationId,
+    projectImportDestinationProjects,
+    canConfirmProjectImport,
     hasPendingRestoreData,
     pendingRestoreSummary,
     hasLastRestoreBackup,
@@ -56,8 +78,11 @@ export function DataPanel({
     activeProjectName,
     activeBuckets,
     openAdvancedSectionsInTests,
-    onConfirmUploadData,
-    onCancelUploadData,
+    onConfirmProjectImport,
+    onCancelProjectImport,
+    onProjectImportSourceChange,
+    onProjectImportDestinationKindChange,
+    onProjectImportDestinationChange,
     onToggleExportScopeMenu,
     onSelectExportScope,
     onExportData,
@@ -66,7 +91,7 @@ export function DataPanel({
     onDismissRestoreUndoCard,
     onUndoRestoreData,
     onRestoreFileChange,
-    onUploadFileChange,
+    onProjectImportFileChange,
 }: DataPanelProps) {
     const Wrapper = embedded ? 'div' : 'section';
     const selectedBucket = exportScope.startsWith('bucket:')
@@ -87,7 +112,7 @@ export function DataPanel({
         >
             {!embedded ? <h2>Data</h2> : null}
             <p className="section-helper">
-                Export a backup any time. Upload and restore actions are in Advanced options.
+                Export a backup any time. Project import and restore actions are in Advanced options.
             </p>
             <div className="data-action-row">
                 <button type="button" className="secondary-button" onClick={onExportData}>
@@ -160,41 +185,112 @@ export function DataPanel({
                 )}
 
                 <div
-                    className="data-action-group project-import-placeholder"
+                    className="data-action-group project-import"
                     role="group"
-                    aria-label="Project import and upload"
+                    aria-label="Project import"
                 >
-                    <p className="data-action-label">Project import / upload</p>
+                    <p className="data-action-label">Project import</p>
                     <div className="data-action-row">
-                        <button type="button" className="secondary-button" onClick={() => uploadInputRef.current?.click()}>
-                            Upload JSON to merge
+                        <button
+                            type="button"
+                            className="secondary-button"
+                            onClick={() => projectImportInputRef.current?.click()}
+                        >
+                            Import project JSON
                         </button>
                     </div>
                 </div>
 
-                {hasPendingUploadData && (
-                    <div ref={uploadConfirmRef} className="inline-confirm interaction-scroll-target interaction-enter" role="group" aria-label="Confirm upload data">
-                        <span className="inline-confirm-text">
-                            Upload {pendingUploadSummary} into current planner?
-                        </span>
+                {hasPendingProjectImport && (
+                    <div
+                        ref={projectImportConfirmRef}
+                        className="inline-confirm project-import-config interaction-scroll-target interaction-enter"
+                        role="group"
+                        aria-label="Configure project import"
+                    >
+                        <span className="inline-confirm-text">{projectImportSourceKindLabel}</span>
+                        {projectImportSourceOptions.length === 1 ? (
+                            <p className="data-scope-context">
+                                Source project: <strong>{projectImportSourceOptions[0].label}</strong>
+                            </p>
+                        ) : (
+                            <label className="project-import-field">
+                                <span>Source project</span>
+                                <select
+                                    aria-label="Source project"
+                                    value={selectedProjectImportSourceId}
+                                    onChange={(event) => onProjectImportSourceChange(event.target.value)}
+                                >
+                                    <option value="">Choose source project</option>
+                                    {projectImportSourceOptions.map((option) => (
+                                        <option key={option.projectId} value={option.projectId}>
+                                            {option.label}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                        )}
+
+                        <fieldset className="project-import-destination">
+                            <legend>Import destination</legend>
+                            <label>
+                                <input
+                                    type="radio"
+                                    name="project-import-destination"
+                                    value="new"
+                                    checked={projectImportDestinationKind === 'new'}
+                                    onChange={() => onProjectImportDestinationKindChange('new')}
+                                />
+                                <span>Create as new project</span>
+                            </label>
+                            <label>
+                                <input
+                                    type="radio"
+                                    name="project-import-destination"
+                                    value="existing"
+                                    checked={projectImportDestinationKind === 'existing'}
+                                    disabled={projectImportDestinationProjects.length === 0}
+                                    onChange={() => onProjectImportDestinationKindChange('existing')}
+                                />
+                                <span>Merge into existing project</span>
+                            </label>
+                        </fieldset>
+
+                        {projectImportDestinationKind === 'existing' && (
+                            <label className="project-import-field">
+                                <span>Destination project</span>
+                                <select
+                                    aria-label="Destination project"
+                                    value={selectedProjectImportDestinationId}
+                                    onChange={(event) => onProjectImportDestinationChange(event.target.value)}
+                                >
+                                    <option value="">Choose destination project</option>
+                                    {projectImportDestinationProjects.map((project) => (
+                                        <option key={project.projectId} value={project.projectId}>
+                                            {project.label}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                        )}
+
                         <div className="inline-confirm-actions">
                             <button
                                 type="button"
-                                className="icon-button inline-confirm-accept"
-                                onClick={onConfirmUploadData}
-                                aria-label="Confirm upload"
-                                title="Confirm upload"
+                                className="secondary-button"
+                                onClick={onConfirmProjectImport}
+                                aria-label="Confirm project import"
+                                disabled={!canConfirmProjectImport}
                             >
-                                ✓
+                                Import project
                             </button>
                             <button
                                 type="button"
-                                className="icon-button inline-confirm-cancel"
-                                onClick={onCancelUploadData}
-                                aria-label="Cancel upload"
-                                title="Cancel upload"
+                                className="secondary-button"
+                                onClick={onCancelProjectImport}
+                                aria-label="Cancel project import"
                             >
-                                ✕
+                                Cancel
                             </button>
                         </div>
                     </div>
@@ -266,7 +362,11 @@ export function DataPanel({
                 )}
             </details>
 
-            {dataActionMessage && <p className="data-message">{dataActionMessage}</p>}
+            {dataActionMessage && (
+                <p className="data-message" role="status" aria-live="polite">
+                    {dataActionMessage}
+                </p>
+            )}
 
             <input
                 ref={restoreInputRef}
@@ -277,12 +377,12 @@ export function DataPanel({
                 onChange={onRestoreFileChange}
             />
             <input
-                ref={uploadInputRef}
+                ref={projectImportInputRef}
                 className="visually-hidden"
                 type="file"
                 accept="application/json,.json"
-                aria-label="Upload planner data from JSON"
-                onChange={onUploadFileChange}
+                aria-label="Import a project from JSON"
+                onChange={onProjectImportFileChange}
             />
         </Wrapper>
     );

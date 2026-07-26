@@ -33,7 +33,7 @@ import {
   formatTaskForOrderedCopy,
   formatTaskForSingleCopy,
 } from './services/plannerClipboard';
-import { coercePlannerDataToV2, mergeUploadedPlannerDataV2 } from './services/plannerImport';
+import { coercePlannerDataToV2 } from './services/plannerImport';
 import {
   buildStructuredBucketCopyDocument,
   formatProjectMarkdownForCopy,
@@ -43,8 +43,21 @@ import {
   buildPlannerExportFilename,
   buildProjectExchangeEnvelope,
   buildRawPlannerDataExport,
+  isValidProjectExchangeEnvelope,
   type PlannerExportFilenameScope,
 } from './services/plannerExport';
+import {
+  importPlannerProject,
+  isProjectExchangeEnvelopeCandidate,
+  parsePlannerProjectImport,
+  type ParsedPlannerProjectImport,
+  type PlannerProjectImportSummary,
+} from './services/plannerProjectImport';
+import {
+  clearRestoreRecoverySnapshot,
+  loadRestoreRecoverySnapshot,
+  saveRestoreRecoverySnapshot,
+} from './services/restoreRecovery';
 
 const accentIndexFromBucket = (bucketId: string | null) => {
   if (!bucketId) return 0;
@@ -78,6 +91,33 @@ const DROP_SETTLE_DURATION_MS = 1500;
 const BOARD_EDGE_AUTOSCROLL_ZONE_PX = 96;
 const BOARD_EDGE_AUTOSCROLL_MAX_SPEED_PX = 24;
 
+const formatProjectImportSummary = (
+  summary: PlannerProjectImportSummary,
+  sourceProjectName: string,
+  destinationProjectName: string,
+): string => {
+  const destinationSummary = summary.projectCreatedCount > 0
+    ? 'created 1 project'
+    : 'merged into 1 existing project';
+  const ambiguitySummary = (
+    summary.templateAmbiguousMatchCount
+    + summary.templateDefinitionAmbiguousMatchCount
+    + summary.bucketAmbiguousMatchCount
+  );
+
+  return [
+    `Imported "${sourceProjectName}" into "${destinationProjectName}"`,
+    destinationSummary,
+    `created ${summary.bucketCreatedCount} bucket(s)`,
+    `reused ${summary.bucketReusedCount} bucket(s)`,
+    `created ${summary.taskCreatedCount} task(s)`,
+    `skipped ${summary.taskSkippedDuplicateCount} duplicate task(s)`,
+    `created ${summary.dependencyCreatedCount} template record(s)`,
+    `reused ${summary.dependencyReusedCount} template record(s)`,
+    `resolved ${ambiguitySummary} ambiguous match(es) by creating new records`,
+  ].join('; ') + '.';
+};
+
 const normalizeQuickAddName = (name: string) => name.trim().toLocaleLowerCase();
 
 const now = (): string => new Date().toISOString();
@@ -85,6 +125,30 @@ const now = (): string => new Date().toISOString();
 const selectInitialProjectId = (projects: Project[]): string => (
   projects.find((project) => project.pinned)?.id ?? projects[0]?.id ?? ''
 );
+
+const buildProjectChoiceOptions = (
+  projects: readonly Project[],
+): Array<{ projectId: string; label: string }> => {
+  const counts = new Map<string, number>();
+  projects.forEach((project) => {
+    const label = project.name.trim() || 'Untitled project';
+    const key = label.toLocaleLowerCase();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  });
+
+  const ordinals = new Map<string, number>();
+  return projects.map((project) => {
+    const baseLabel = project.name.trim() || 'Untitled project';
+    const key = baseLabel.toLocaleLowerCase();
+    const count = counts.get(key) ?? 1;
+    const ordinal = (ordinals.get(key) ?? 0) + 1;
+    ordinals.set(key, ordinal);
+    return {
+      projectId: project.id,
+      label: count > 1 ? `${baseLabel} (${ordinal} of ${count})` : baseLabel,
+    };
+  });
+};
 
 const selectNearestProjectIdAfterDeletion = (projects: Project[], deletedProjectId: string): string => {
   const sourceIndex = projects.findIndex((project) => project.id === deletedProjectId);
@@ -262,8 +326,13 @@ export default function App() {
   const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(null);
   const [renameDialogError, setRenameDialogError] = useState<string | null>(null);
   const [pendingRestoreData, setPendingRestoreData] = useState<PlannerData | null>(null);
-  const [pendingUploadData, setPendingUploadData] = useState<PlannerData | null>(null);
-  const [lastRestoreBackup, setLastRestoreBackup] = useState<PlannerData | null>(null);
+  const [pendingProjectImport, setPendingProjectImport] = useState<ParsedPlannerProjectImport | null>(null);
+  const [selectedProjectImportSourceId, setSelectedProjectImportSourceId] = useState('');
+  const [projectImportDestinationKind, setProjectImportDestinationKind] = useState<'new' | 'existing' | null>(null);
+  const [selectedProjectImportDestinationId, setSelectedProjectImportDestinationId] = useState('');
+  const [lastRestoreBackup, setLastRestoreBackup] = useState<PlannerData | null>(() => (
+    loadRestoreRecoverySnapshot(localStorage, initialLoadResult.data)?.previousData ?? null
+  ));
   const [pendingBucketWarp, setPendingBucketWarp] = useState(false);
   const [highlightedBucketId, setHighlightedBucketId] = useState<string | null>(null);
   const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
@@ -311,7 +380,7 @@ export default function App() {
   const [settledBucketFrom, setSettledBucketFrom] = useState<'left' | 'right' | null>(null);
   const [status, setStatus] = useState('Saved locally');
   const restoreInputRef = useRef<HTMLInputElement>(null);
-  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const projectImportInputRef = useRef<HTMLInputElement>(null);
   const quickTaskInputRef = useRef<HTMLInputElement>(null);
   const quickTaskBucketInputRef = useRef<HTMLInputElement>(null);
   const quickTaskProjectInputRef = useRef<HTMLInputElement>(null);
@@ -326,9 +395,11 @@ export default function App() {
   const boardAutoscrollFrameRef = useRef<number | null>(null);
   const bucketElementRefs = useRef<Record<string, HTMLElement | null>>({});
   const restoreConfirmRef = useRef<HTMLDivElement>(null);
-  const uploadConfirmRef = useRef<HTMLDivElement>(null);
+  const projectImportConfirmRef = useRef<HTMLDivElement>(null);
   const exportScopeMenuRef = useRef<HTMLDivElement>(null);
   const restoreUndoCloseTimeoutRef = useRef<number | null>(null);
+  const restoreFileReadSequenceRef = useRef(0);
+  const projectImportFileReadSequenceRef = useRef(0);
   const bucketHighlightTimeoutRef = useRef<number | null>(null);
   const taskSurgeTimeoutRef = useRef<number | null>(null);
   const uploadHaloTimeoutRef = useRef<number | null>(null);
@@ -442,6 +513,23 @@ export default function App() {
   }, [selectedTemplateId, state.templates]);
 
   useEffect(() => {
+    if (
+      projectImportDestinationKind !== 'existing'
+      || !selectedProjectImportDestinationId
+      || state.projects.some(
+        (project) => project.id === selectedProjectImportDestinationId,
+      )
+    ) {
+      return;
+    }
+    setSelectedProjectImportDestinationId('');
+  }, [
+    projectImportDestinationKind,
+    selectedProjectImportDestinationId,
+    state.projects,
+  ]);
+
+  useEffect(() => {
     try {
       savePlannerDataV2ToLocalStorage(state);
       setStatus('Saved locally');
@@ -449,6 +537,15 @@ export default function App() {
       setStatus('Could not save locally');
     }
   }, [state]);
+
+  useEffect(() => {
+    if (!lastRestoreBackup) return;
+    const recoverySnapshot = loadRestoreRecoverySnapshot(localStorage, state);
+    if (recoverySnapshot) return;
+    setLastRestoreBackup(null);
+    setHideRestoreUndoCard(false);
+    setIsRestoreUndoClosing(false);
+  }, [lastRestoreBackup, state]);
 
   useEffect(() => {
     if (!exportNotice) return;
@@ -1218,77 +1315,242 @@ export default function App() {
     }, 1000);
   };
 
-  const readPlannerDataFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
+  const readJsonFromFile = async (
+    event: ChangeEvent<HTMLInputElement>,
+  ): Promise<
+    | { ok: true; value: unknown }
+    | { ok: false; message: string }
+    | null
+  > => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return null;
 
     try {
-      const parsed: unknown = JSON.parse(await file.text());
-      const result = coercePlannerDataToV2(parsed);
-      setDataActionMessage(null);
-      return result.data;
+      return { ok: true, value: JSON.parse(await file.text()) as unknown };
     } catch (error) {
       if (error instanceof SyntaxError) {
-        setDataActionMessage('Selected file could not be read as JSON.');
-        return null;
+        return { ok: false, message: 'Selected file could not be read as JSON.' };
       }
-      setDataActionMessage(`Selected file is not a valid ${APP_NAME} export.`);
-      return null;
+      return { ok: false, message: 'Selected file could not be read.' };
     }
   };
 
   const restoreDataFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const parsedData = await readPlannerDataFromFile(event);
-    if (!parsedData) return;
-    setPendingUploadData(null);
-    setPendingRestoreData(parsedData);
+    const readSequence = ++restoreFileReadSequenceRef.current;
+    projectImportFileReadSequenceRef.current += 1;
+    setPendingRestoreData(null);
+    setPendingProjectImport(null);
+    setSelectedProjectImportSourceId('');
+    setProjectImportDestinationKind(null);
+    setSelectedProjectImportDestinationId('');
+    const fileResult = await readJsonFromFile(event);
+    if (readSequence !== restoreFileReadSequenceRef.current || !fileResult) return;
+    if (!fileResult.ok) {
+      setDataActionMessage(fileResult.message);
+      return;
+    }
+
+    if (
+      isValidProjectExchangeEnvelope(fileResult.value)
+      || isProjectExchangeEnvelopeCandidate(fileResult.value)
+    ) {
+      setPendingRestoreData(null);
+      setDataActionMessage(
+        'This is a project export. Use Import project JSON instead; Restore only accepts full planner backups.',
+      );
+      return;
+    }
+
+    try {
+      const result = coercePlannerDataToV2(fileResult.value);
+      setPendingProjectImport(null);
+      setSelectedProjectImportSourceId('');
+      setProjectImportDestinationKind(null);
+      setSelectedProjectImportDestinationId('');
+      setPendingRestoreData(result.data);
+      setDataActionMessage(null);
+    } catch {
+      setPendingRestoreData(null);
+      setDataActionMessage(`Selected file is not a valid ${APP_NAME} full-data backup.`);
+    }
   };
 
-  const mergeDataFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const parsedData = await readPlannerDataFromFile(event);
-    if (!parsedData) return;
+  const clearPendingProjectImport = () => {
+    projectImportFileReadSequenceRef.current += 1;
+    setPendingProjectImport(null);
+    setSelectedProjectImportSourceId('');
+    setProjectImportDestinationKind(null);
+    setSelectedProjectImportDestinationId('');
+  };
+
+  const clearWorkspaceTransientState = (clearClipboard: boolean) => {
+    setSelectedTaskIds(new Set());
+    setActivePasteBucketId(null);
+    if (clearClipboard) {
+      setTaskClipboard([]);
+    }
+    setEditor(null);
+    setSearchQuery('');
+    setConfirmDialog(null);
+    setRenameDialog(null);
+    setRenameDialogError(null);
+    setShowArchiveConfirm(false);
+    setBoardBucketAddOpen(false);
+    setBoardBucketNameDraft('');
+    setPendingBucketWarp(false);
+    setHighlightedBucketId(null);
+    setHighlightedTaskId(null);
+    setHighlightedTaskBucketId(null);
+    setUploadedTaskIds([]);
+    setPendingTaskSurge(false);
+    setDraggedTaskId(null);
+    setDraggedTaskIds([]);
+    setDraggedBucketId(null);
+    setActiveBucketDropIndex(null);
+    setSettledBucketDropIndex(null);
+    setSettledBucketId(null);
+    setSettledBucketFrom(null);
+    cancelBoardEdgeAutoscroll();
+
+    if (bucketHighlightTimeoutRef.current !== null) {
+      window.clearTimeout(bucketHighlightTimeoutRef.current);
+      bucketHighlightTimeoutRef.current = null;
+    }
+    if (taskSurgeTimeoutRef.current !== null) {
+      window.clearTimeout(taskSurgeTimeoutRef.current);
+      taskSurgeTimeoutRef.current = null;
+    }
+    if (uploadHaloTimeoutRef.current !== null) {
+      window.clearTimeout(uploadHaloTimeoutRef.current);
+      uploadHaloTimeoutRef.current = null;
+    }
+    if (bucketDropSettleTimeoutRef.current !== null) {
+      window.clearTimeout(bucketDropSettleTimeoutRef.current);
+      bucketDropSettleTimeoutRef.current = null;
+    }
+  };
+
+  const importProjectFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const readSequence = ++projectImportFileReadSequenceRef.current;
+    restoreFileReadSequenceRef.current += 1;
+    setPendingProjectImport(null);
+    setSelectedProjectImportSourceId('');
+    setProjectImportDestinationKind(null);
+    setSelectedProjectImportDestinationId('');
     setPendingRestoreData(null);
-    setPendingUploadData(parsedData);
+    const fileResult = await readJsonFromFile(event);
+    if (readSequence !== projectImportFileReadSequenceRef.current || !fileResult) return;
+    if (!fileResult.ok) {
+      setDataActionMessage(fileResult.message);
+      return;
+    }
+
+    try {
+      const parsed = parsePlannerProjectImport(fileResult.value);
+      setPendingProjectImport(parsed);
+      setSelectedProjectImportSourceId(parsed.autoSelectedSourceProjectId ?? '');
+      setProjectImportDestinationKind(null);
+      setSelectedProjectImportDestinationId('');
+      setDataActionMessage(null);
+    } catch (error) {
+      clearPendingProjectImport();
+      setDataActionMessage(
+        error instanceof Error
+          ? error.message
+          : `Selected file is not a valid ${APP_NAME} project import.`,
+      );
+    }
+  };
+
+  const confirmProjectImport = () => {
+    if (!pendingProjectImport || !selectedProjectImportSourceId || !projectImportDestinationKind) {
+      return;
+    }
+    if (projectImportDestinationKind === 'existing' && !selectedProjectImportDestinationId) {
+      return;
+    }
+
+    try {
+      const result = importPlannerProject(state, pendingProjectImport, {
+        sourceProjectId: selectedProjectImportSourceId,
+        destination: projectImportDestinationKind === 'new'
+          ? { kind: 'new' }
+          : { kind: 'existing', projectId: selectedProjectImportDestinationId },
+        createUniqueId: createId,
+        importedAt: now(),
+      });
+      const destinationProject = result.data.projects.find(
+        (project) => project.id === result.activationProjectId,
+      );
+
+      clearRestoreRecoverySnapshot(localStorage);
+      setLastRestoreBackup(null);
+      setHideRestoreUndoCard(false);
+      setIsRestoreUndoClosing(false);
+      clearWorkspaceTransientState(false);
+      dispatchPlanner({ type: 'REPLACE_DATA', data: result.data });
+      setActiveProjectId(result.activationProjectId);
+      setQuickTaskProjectId(result.activationProjectId);
+      setQuickTaskProjectName(destinationProject?.name ?? '');
+      setQuickTaskBucketId(null);
+      setQuickTaskBucketName('');
+      setQuickTaskMessage(null);
+
+      setUploadedTaskIds(result.uploadedTaskIds);
+      uploadHaloTimeoutRef.current = window.setTimeout(() => {
+        setUploadedTaskIds([]);
+        uploadHaloTimeoutRef.current = null;
+      }, UPLOAD_HALO_DURATION_MS);
+
+      clearPendingProjectImport();
+      setDataActionMessage(formatProjectImportSummary(
+        result.summary,
+        result.sourceProjectName,
+        destinationProject?.name ?? 'Untitled project',
+      ));
+    } catch (error) {
+      setDataActionMessage(
+        error instanceof Error
+          ? `Project import could not be completed: ${error.message}`
+          : 'Project import could not be completed.',
+      );
+    }
   };
 
   const confirmRestoreData = () => {
     if (!pendingRestoreData) return;
+    const recoveryResult = saveRestoreRecoverySnapshot(
+      localStorage,
+      state,
+      pendingRestoreData,
+      now(),
+    );
+    if (!recoveryResult.ok) {
+      setDataActionMessage(
+        'Restore was not started because a recovery snapshot could not be saved locally.',
+      );
+      return;
+    }
+
     const restoredProjectId = selectInitialProjectId(pendingRestoreData.projects);
     const restoredProject = pendingRestoreData.projects.find(
       (project) => project.id === restoredProjectId,
     );
-    setLastRestoreBackup(state);
+    setLastRestoreBackup(recoveryResult.snapshot.previousData);
     setHideRestoreUndoCard(false);
     setIsRestoreUndoClosing(false);
+    clearWorkspaceTransientState(true);
     dispatchPlanner({ type: 'REPLACE_DATA', data: pendingRestoreData });
     setActiveProjectId(restoredProjectId);
-    setSelectedTaskIds(new Set());
     setQuickTaskProjectId(restoredProjectId || null);
     setQuickTaskProjectName(restoredProject?.name ?? '');
     setQuickTaskBucketId(null);
     setQuickTaskBucketName('');
     setQuickTaskMessage(null);
+    clearPendingProjectImport();
     setPendingRestoreData(null);
     setDataActionMessage(null);
-  };
-
-  const confirmUploadData = () => {
-    if (!pendingUploadData || !effectiveActiveProjectId) return;
-    const mergedUpload = mergeUploadedPlannerDataV2(state, pendingUploadData, { targetProjectId: effectiveActiveProjectId });
-    dispatchPlanner({ type: 'REPLACE_DATA', data: mergedUpload.data });
-    if (uploadHaloTimeoutRef.current !== null) {
-      window.clearTimeout(uploadHaloTimeoutRef.current);
-    }
-    setUploadedTaskIds((current) => Array.from(new Set([...current, ...mergedUpload.uploadedTaskIds])));
-    uploadHaloTimeoutRef.current = window.setTimeout(() => {
-      setUploadedTaskIds([]);
-      uploadHaloTimeoutRef.current = null;
-    }, UPLOAD_HALO_DURATION_MS);
-    setPendingUploadData(null);
-    setDataActionMessage(
-      `Uploaded ${mergedUpload.uploadedTaskIds.length} task(s); merged into ${mergedUpload.mergedIntoExistingBucketCount} existing bucket(s); created ${mergedUpload.createdBucketCount} bucket(s); skipped ${mergedUpload.skippedDuplicateCount} duplicate task(s).`,
-    );
   };
 
   const undoRestoreData = () => {
@@ -1297,9 +1559,10 @@ export default function App() {
     const restoredProject = lastRestoreBackup.projects.find(
       (project) => project.id === restoredProjectId,
     );
+    clearRestoreRecoverySnapshot(localStorage);
+    clearWorkspaceTransientState(true);
     dispatchPlanner({ type: 'REPLACE_DATA', data: lastRestoreBackup });
     setActiveProjectId(restoredProjectId);
-    setSelectedTaskIds(new Set());
     setQuickTaskProjectId(restoredProjectId || null);
     setQuickTaskProjectName(restoredProject?.name ?? '');
     setQuickTaskBucketId(null);
@@ -1308,7 +1571,7 @@ export default function App() {
     setLastRestoreBackup(null);
     setHideRestoreUndoCard(false);
     setIsRestoreUndoClosing(false);
-    setDataActionMessage(null);
+    setDataActionMessage('Restore undone.');
   };
 
   const dismissRestoreUndoCard = () => {
@@ -1320,6 +1583,8 @@ export default function App() {
     restoreUndoCloseTimeoutRef.current = window.setTimeout(() => {
       setHideRestoreUndoCard(true);
       setIsRestoreUndoClosing(false);
+      setLastRestoreBackup(null);
+      clearRestoreRecoverySnapshot(localStorage);
       restoreUndoCloseTimeoutRef.current = null;
     }, 420);
   };
@@ -1327,9 +1592,31 @@ export default function App() {
   const pendingRestoreSummary = pendingRestoreData
     ? `${pendingRestoreData.tasks.length} task(s) and ${pendingRestoreData.buckets.length} bucket(s)`
     : '';
-  const pendingUploadSummary = pendingUploadData
-    ? `${pendingUploadData.tasks.length} task(s) and ${pendingUploadData.buckets.length} bucket(s)`
+  const projectImportSourceOptions = pendingProjectImport?.sourceProjectChoices.map((choice) => ({
+    projectId: choice.projectId,
+    label: choice.label,
+  })) ?? [];
+  const projectImportDestinationProjects = buildProjectChoiceOptions(state.projects);
+  const projectImportSourceKindLabel = pendingProjectImport
+    ? pendingProjectImport.sourceKind === 'project-envelope'
+      ? 'Project export ready to import.'
+      : pendingProjectImport.sourceKind === 'raw-v1'
+        ? 'Legacy planner export ready; choose one source project.'
+        : 'Planner backup ready; choose one source project.'
     : '';
+  const canConfirmProjectImport = Boolean(
+    pendingProjectImport
+    && projectImportSourceOptions.some(
+      (option) => option.projectId === selectedProjectImportSourceId,
+    )
+    && projectImportDestinationKind
+    && (
+      projectImportDestinationKind === 'new'
+      || projectImportDestinationProjects.some(
+        (project) => project.projectId === selectedProjectImportDestinationId,
+      )
+    ),
+  );
   const exportScopeOptionCount = 3 + activeBuckets.length;
 
   useEffect(() => {
@@ -1559,9 +1846,9 @@ export default function App() {
   }, [pendingRestoreData]);
 
   useEffect(() => {
-    if (!pendingUploadData) return;
-    ensureScrollableTargetInView(sidepanelRef.current, uploadConfirmRef.current);
-  }, [pendingUploadData]);
+    if (!pendingProjectImport) return;
+    ensureScrollableTargetInView(sidepanelRef.current, projectImportConfirmRef.current);
+  }, [pendingProjectImport]);
 
   useEffect(() => {
     if (!draggedTaskId && !draggedBucketId) {
@@ -2073,13 +2360,19 @@ export default function App() {
             )}
             onUnarchiveTask={(task) => dispatchPlanner({ type: 'UNARCHIVE_TASK', projectId: task.projectId, taskId: task.id, updatedAt: now() })}
             getBucketName={(bucketId) => (bucketId ? bucketNameById.get(bucketId) ?? 'Unassigned' : 'Unassigned')}
-            uploadInputRef={uploadInputRef}
+            projectImportInputRef={projectImportInputRef}
             restoreInputRef={restoreInputRef}
-            uploadConfirmRef={uploadConfirmRef}
+            projectImportConfirmRef={projectImportConfirmRef}
             restoreConfirmRef={restoreConfirmRef}
             exportScopeMenuRef={exportScopeMenuRef}
-            hasPendingUploadData={Boolean(pendingUploadData)}
-            pendingUploadSummary={pendingUploadSummary}
+            hasPendingProjectImport={Boolean(pendingProjectImport)}
+            projectImportSourceKindLabel={projectImportSourceKindLabel}
+            projectImportSourceOptions={projectImportSourceOptions}
+            selectedProjectImportSourceId={selectedProjectImportSourceId}
+            projectImportDestinationKind={projectImportDestinationKind}
+            selectedProjectImportDestinationId={selectedProjectImportDestinationId}
+            projectImportDestinationProjects={projectImportDestinationProjects}
+            canConfirmProjectImport={canConfirmProjectImport}
             hasPendingRestoreData={Boolean(pendingRestoreData)}
             pendingRestoreSummary={pendingRestoreSummary}
             hasLastRestoreBackup={Boolean(lastRestoreBackup)}
@@ -2089,8 +2382,16 @@ export default function App() {
             showExportScopeMenu={showExportScopeMenu}
             exportScope={exportScope}
             exportScopeOptionCount={exportScopeOptionCount}
-            onConfirmUploadData={confirmUploadData}
-            onCancelUploadData={() => setPendingUploadData(null)}
+            onConfirmProjectImport={confirmProjectImport}
+            onCancelProjectImport={clearPendingProjectImport}
+            onProjectImportSourceChange={setSelectedProjectImportSourceId}
+            onProjectImportDestinationKindChange={(kind) => {
+              setProjectImportDestinationKind(kind);
+              if (kind === 'new') {
+                setSelectedProjectImportDestinationId('');
+              }
+            }}
+            onProjectImportDestinationChange={setSelectedProjectImportDestinationId}
             onToggleExportScopeMenu={() => setShowExportScopeMenu((current) => !current)}
             onSelectExportScope={(scope) => {
               setExportScope(scope);
@@ -2098,11 +2399,14 @@ export default function App() {
             }}
             onExportData={exportData}
             onConfirmRestoreData={confirmRestoreData}
-            onCancelRestoreData={() => setPendingRestoreData(null)}
+            onCancelRestoreData={() => {
+              restoreFileReadSequenceRef.current += 1;
+              setPendingRestoreData(null);
+            }}
             onDismissRestoreUndoCard={dismissRestoreUndoCard}
             onUndoRestoreData={undoRestoreData}
             onRestoreFileChange={restoreDataFromFile}
-            onUploadFileChange={mergeDataFromFile}
+            onProjectImportFileChange={importProjectFromFile}
           />
           <div
             ref={boardFrameRef}

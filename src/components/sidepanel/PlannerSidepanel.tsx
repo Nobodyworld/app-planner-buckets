@@ -10,7 +10,11 @@ import { SidebarDisclosure } from '../SidebarDisclosure';
 import { TemplateLibrary } from '../TemplateLibrary';
 import { ArchivePanel, type ArchiveStats } from './ArchivePanel';
 import { CreateBucketPanel } from './CreateBucketPanel';
-import { DataPanel } from './DataPanel';
+import {
+    DataPanel,
+    type ProjectImportDestinationKind,
+    type ProjectImportSourceOption,
+} from './DataPanel';
 import { QuickTaskPanel } from './QuickTaskPanel';
 import type {
     BucketV2 as Bucket,
@@ -116,13 +120,19 @@ export interface PlannerSidepanelProps {
     onUnarchiveTask: (task: PlannerTask) => void;
     getBucketName: (bucketId: string | null) => string;
 
-    uploadInputRef: RefObject<HTMLInputElement>;
+    projectImportInputRef: RefObject<HTMLInputElement>;
     restoreInputRef: RefObject<HTMLInputElement>;
-    uploadConfirmRef: RefObject<HTMLDivElement>;
+    projectImportConfirmRef: RefObject<HTMLDivElement>;
     restoreConfirmRef: RefObject<HTMLDivElement>;
     exportScopeMenuRef: RefObject<HTMLDivElement>;
-    hasPendingUploadData: boolean;
-    pendingUploadSummary: string;
+    hasPendingProjectImport: boolean;
+    projectImportSourceKindLabel: string;
+    projectImportSourceOptions: ProjectImportSourceOption[];
+    selectedProjectImportSourceId: string;
+    projectImportDestinationKind: ProjectImportDestinationKind;
+    selectedProjectImportDestinationId: string;
+    projectImportDestinationProjects: ProjectImportSourceOption[];
+    canConfirmProjectImport: boolean;
     hasPendingRestoreData: boolean;
     pendingRestoreSummary: string;
     hasLastRestoreBackup: boolean;
@@ -132,8 +142,11 @@ export interface PlannerSidepanelProps {
     showExportScopeMenu: boolean;
     exportScope: string;
     exportScopeOptionCount: number;
-    onConfirmUploadData: () => void;
-    onCancelUploadData: () => void;
+    onConfirmProjectImport: () => void;
+    onCancelProjectImport: () => void;
+    onProjectImportSourceChange: (projectId: string) => void;
+    onProjectImportDestinationKindChange: (kind: Exclude<ProjectImportDestinationKind, null>) => void;
+    onProjectImportDestinationChange: (projectId: string) => void;
     onToggleExportScopeMenu: () => void;
     onSelectExportScope: (scope: string) => void;
     onExportData: () => void;
@@ -142,7 +155,7 @@ export interface PlannerSidepanelProps {
     onDismissRestoreUndoCard: () => void;
     onUndoRestoreData: () => void;
     onRestoreFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
-    onUploadFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
+    onProjectImportFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
 }
 
 export function PlannerSidepanel({
@@ -234,13 +247,19 @@ export function PlannerSidepanel({
     onCopyArchivedTask,
     onUnarchiveTask,
     getBucketName,
-    uploadInputRef,
+    projectImportInputRef,
     restoreInputRef,
-    uploadConfirmRef,
+    projectImportConfirmRef,
     restoreConfirmRef,
     exportScopeMenuRef,
-    hasPendingUploadData,
-    pendingUploadSummary,
+    hasPendingProjectImport,
+    projectImportSourceKindLabel,
+    projectImportSourceOptions,
+    selectedProjectImportSourceId,
+    projectImportDestinationKind,
+    selectedProjectImportDestinationId,
+    projectImportDestinationProjects,
+    canConfirmProjectImport,
     hasPendingRestoreData,
     pendingRestoreSummary,
     hasLastRestoreBackup,
@@ -250,8 +269,11 @@ export function PlannerSidepanel({
     showExportScopeMenu,
     exportScope,
     exportScopeOptionCount,
-    onConfirmUploadData,
-    onCancelUploadData,
+    onConfirmProjectImport,
+    onCancelProjectImport,
+    onProjectImportSourceChange,
+    onProjectImportDestinationKindChange,
+    onProjectImportDestinationChange,
     onToggleExportScopeMenu,
     onSelectExportScope,
     onExportData,
@@ -260,7 +282,7 @@ export function PlannerSidepanel({
     onDismissRestoreUndoCard,
     onUndoRestoreData,
     onRestoreFileChange,
-    onUploadFileChange,
+    onProjectImportFileChange,
 }: PlannerSidepanelProps) {
     return (
         <aside
@@ -405,13 +427,19 @@ export function PlannerSidepanel({
             <SidebarDisclosure title="Data" className="data-panel">
                 <DataPanel
                     embedded
-                    uploadInputRef={uploadInputRef}
+                    projectImportInputRef={projectImportInputRef}
                     restoreInputRef={restoreInputRef}
-                    uploadConfirmRef={uploadConfirmRef}
+                    projectImportConfirmRef={projectImportConfirmRef}
                     restoreConfirmRef={restoreConfirmRef}
                     exportScopeMenuRef={exportScopeMenuRef}
-                    hasPendingUploadData={hasPendingUploadData}
-                    pendingUploadSummary={pendingUploadSummary}
+                    hasPendingProjectImport={hasPendingProjectImport}
+                    projectImportSourceKindLabel={projectImportSourceKindLabel}
+                    projectImportSourceOptions={projectImportSourceOptions}
+                    selectedProjectImportSourceId={selectedProjectImportSourceId}
+                    projectImportDestinationKind={projectImportDestinationKind}
+                    selectedProjectImportDestinationId={selectedProjectImportDestinationId}
+                    projectImportDestinationProjects={projectImportDestinationProjects}
+                    canConfirmProjectImport={canConfirmProjectImport}
                     hasPendingRestoreData={hasPendingRestoreData}
                     pendingRestoreSummary={pendingRestoreSummary}
                     hasLastRestoreBackup={hasLastRestoreBackup}
@@ -424,8 +452,11 @@ export function PlannerSidepanel({
                     activeProjectName={activeProjectName}
                     activeBuckets={activeBuckets}
                     openAdvancedSectionsInTests={openAdvancedSectionsInTests}
-                    onConfirmUploadData={onConfirmUploadData}
-                    onCancelUploadData={onCancelUploadData}
+                    onConfirmProjectImport={onConfirmProjectImport}
+                    onCancelProjectImport={onCancelProjectImport}
+                    onProjectImportSourceChange={onProjectImportSourceChange}
+                    onProjectImportDestinationKindChange={onProjectImportDestinationKindChange}
+                    onProjectImportDestinationChange={onProjectImportDestinationChange}
                     onToggleExportScopeMenu={onToggleExportScopeMenu}
                     onSelectExportScope={onSelectExportScope}
                     onExportData={onExportData}
@@ -434,7 +465,7 @@ export function PlannerSidepanel({
                     onDismissRestoreUndoCard={onDismissRestoreUndoCard}
                     onUndoRestoreData={onUndoRestoreData}
                     onRestoreFileChange={onRestoreFileChange}
-                    onUploadFileChange={onUploadFileChange}
+                    onProjectImportFileChange={onProjectImportFileChange}
                 />
             </SidebarDisclosure>
         </aside>

@@ -12,9 +12,11 @@ import type { PlannerDataV2, PlannerTaskV2 } from './types/v2';
 import { PLANNER_DATA_V2_VERSION } from './types/v2';
 import { isValidPlannerDataV2 } from './types/validators';
 import {
+    buildProjectExchangeEnvelope,
     isValidProjectExchangeEnvelope,
     type ProjectExchangeEnvelope,
 } from './services/plannerExport';
+import { RESTORE_RECOVERY_STORAGE_KEY } from './services/restoreRecovery';
 
 const V1_STORAGE_KEY = 'planner-buckets:data:v1';
 const V2_STORAGE_KEY = 'planner-buckets:data:v2';
@@ -757,13 +759,13 @@ describe('App integration', () => {
 
         const exportButton = screen.getByRole('button', { name: 'Export JSON' });
         const scopeButton = screen.getByRole('button', { name: 'Choose export scope' });
-        const uploadButton = screen.getByRole('button', { name: 'Upload JSON to merge' });
+        const importButton = screen.getByRole('button', { name: 'Import project JSON' });
         const restoreButton = screen.getByRole('button', { name: 'Restore from JSON backup' });
 
         expect(exportButton.compareDocumentPosition(scopeButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-        expect(scopeButton.compareDocumentPosition(uploadButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-        expect(uploadButton.compareDocumentPosition(restoreButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-        expect(screen.getByRole('group', { name: 'Project import and upload' })).toContainElement(uploadButton);
+        expect(scopeButton.compareDocumentPosition(importButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(importButton.compareDocumentPosition(restoreButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(screen.getByRole('group', { name: 'Project import' })).toContainElement(importButton);
         expect(screen.getByText(/Selected export scope:/)).toHaveTextContent('Selected export scope: All data');
 
         fireEvent.click(scopeButton);
@@ -2141,6 +2143,284 @@ describe('App integration', () => {
         expect(JSON.stringify(envelope)).not.toContain('template-support');
     });
 
+    it('imports a tagged project export as a new remapped project only after an explicit destination choice', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const envelope = buildProjectExchangeEnvelope(
+            plannerV2Fixture,
+            'project-a',
+            '2026-07-25T06:30:00.000Z',
+        );
+
+        render(<App />);
+        expandSidebarSection('Data');
+        fireEvent.change(screen.getByLabelText('Import a project from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(envelope)], 'alpha-project.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+
+        const config = await screen.findByRole('group', { name: 'Configure project import' });
+        expect(within(config).getByText(/Source project:/)).toHaveTextContent(
+            'Source project: Alpha',
+        );
+        const confirmImport = within(config).getByRole('button', {
+            name: 'Confirm project import',
+        });
+        expect(confirmImport).toBeDisabled();
+
+        fireEvent.click(within(config).getByRole('radio', {
+            name: 'Create as new project',
+        }));
+        expect(confirmImport).toBeEnabled();
+        fireEvent.click(confirmImport);
+
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            const importedProject = saved.projects.find(
+                (project) => project.name === 'Alpha (imported)',
+            );
+            expect(importedProject).toBeDefined();
+            expect(saved.projects.map((project) => project.id)).toEqual(
+                expect.arrayContaining(['project-a', 'project-b']),
+            );
+            expect(
+                saved.tasks
+                    .filter((task) => task.projectId === importedProject?.id)
+                    .map((task) => task.title),
+            ).toEqual(['Alpha task', 'Alpha unassigned']);
+        });
+
+        expect(screen.getByRole('region', {
+            name: 'Alpha (imported) board viewport',
+        })).toBeInTheDocument();
+        expect(screen.getByText('Alpha task').closest('.task-card')).toHaveClass(
+            'uploaded-task-highlight',
+        );
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Imported "Alpha" into "Alpha (imported)"',
+        );
+        expect(screen.getByRole('status')).toHaveTextContent('skipped 0 duplicate task(s)');
+    });
+
+    it('requires an explicit source for raw multi-project imports and imports only that closure', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+
+        render(<App />);
+        expandSidebarSection('Data');
+        fireEvent.change(screen.getByLabelText('Import a project from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerV2Fixture)], 'all-projects.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+
+        const config = await screen.findByRole('group', { name: 'Configure project import' });
+        const sourceSelect = within(config).getByLabelText('Source project');
+        const confirmImport = within(config).getByRole('button', {
+            name: 'Confirm project import',
+        });
+        expect(sourceSelect).toHaveValue('');
+
+        fireEvent.click(within(config).getByRole('radio', {
+            name: 'Create as new project',
+        }));
+        expect(confirmImport).toBeDisabled();
+        fireEvent.change(sourceSelect, { target: { value: 'project-a' } });
+        expect(confirmImport).toBeEnabled();
+        fireEvent.click(confirmImport);
+
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            const importedProject = saved.projects.find(
+                (project) => project.name === 'Alpha (imported)',
+            );
+            expect(importedProject).toBeDefined();
+            const importedTitles = saved.tasks
+                .filter((task) => task.projectId === importedProject?.id)
+                .map((task) => task.title);
+            expect(importedTitles).toEqual(['Alpha task', 'Alpha unassigned']);
+            expect(importedTitles).not.toContain('Beta task');
+        });
+    });
+
+    it('merges into the explicitly selected existing project, activates it, and reports duplicates', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const envelope = buildProjectExchangeEnvelope(
+            plannerV2Fixture,
+            'project-b',
+            '2026-07-25T06:30:00.000Z',
+        );
+
+        render(<App />);
+        expandSidebarSection('Projects');
+        fireEvent.change(screen.getByLabelText('Active project'), {
+            target: { value: 'project-a' },
+        });
+        expect(screen.getByRole('region', {
+            name: 'Alpha board viewport',
+        })).toBeInTheDocument();
+
+        expandSidebarSection('Data');
+        fireEvent.change(screen.getByLabelText('Import a project from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(envelope)], 'beta-project.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+
+        const config = await screen.findByRole('group', { name: 'Configure project import' });
+        const confirmImport = within(config).getByRole('button', {
+            name: 'Confirm project import',
+        });
+        fireEvent.click(within(config).getByRole('radio', {
+            name: 'Merge into existing project',
+        }));
+        expect(confirmImport).toBeDisabled();
+        fireEvent.change(within(config).getByLabelText('Destination project'), {
+            target: { value: 'project-b' },
+        });
+        expect(confirmImport).toBeEnabled();
+        fireEvent.click(confirmImport);
+
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            expect(saved.projects).toHaveLength(2);
+            expect(saved.tasks.filter((task) => task.projectId === 'project-a')).toHaveLength(2);
+            expect(saved.tasks.filter((task) => task.projectId === 'project-b')).toHaveLength(1);
+        });
+        expect(screen.getByRole('region', {
+            name: 'Beta board viewport',
+        })).toBeInTheDocument();
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Imported "Beta" into "Beta"',
+        );
+        expect(screen.getByRole('status')).toHaveTextContent('skipped 1 duplicate task(s)');
+    });
+
+    it('routes valid and malformed tagged project exports away from destructive Restore', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const envelope = buildProjectExchangeEnvelope(
+            plannerV2Fixture,
+            'project-a',
+            '2026-07-25T06:30:00.000Z',
+        );
+
+        render(<App />);
+        expandSidebarSection('Data');
+        const restoreInput = screen.getByLabelText('Restore planner data from JSON');
+
+        for (const [filename, payload] of [
+            ['valid-project.json', envelope],
+            ['malformed-project.json', { ...envelope, envelopeVersion: 99 }],
+        ] as const) {
+            fireEvent.change(restoreInput, {
+                target: {
+                    files: [
+                        new File([JSON.stringify(payload)], filename, {
+                            type: 'application/json',
+                        }),
+                    ],
+                },
+            });
+            await waitFor(() => {
+                expect(screen.getByRole('status')).toHaveTextContent(
+                    'This is a project export. Use Import project JSON instead',
+                );
+            });
+            expect(screen.queryByRole('button', {
+                name: 'Confirm restore',
+            })).not.toBeInTheDocument();
+        }
+
+        expect(readRuntimePlannerData()).toEqual(plannerV2Fixture);
+    });
+
+    it('clears stale pending Restore and import confirmations when a later file is unreadable', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const envelope = buildProjectExchangeEnvelope(
+            plannerV2Fixture,
+            'project-a',
+            '2026-07-25T06:30:00.000Z',
+        );
+
+        render(<App />);
+        expandSidebarSection('Data');
+
+        const restoreInput = screen.getByLabelText('Restore planner data from JSON');
+        fireEvent.change(restoreInput, {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerFixture)], 'valid-restore.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        expect(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        })).toBeInTheDocument();
+        fireEvent.change(restoreInput, {
+            target: {
+                files: [
+                    new File(['{'], 'invalid-restore.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        await waitFor(() => {
+            expect(screen.queryByRole('button', {
+                name: 'Confirm restore',
+            })).not.toBeInTheDocument();
+        });
+
+        const importInput = screen.getByLabelText('Import a project from JSON');
+        fireEvent.change(importInput, {
+            target: {
+                files: [
+                    new File([JSON.stringify(envelope)], 'valid-project.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        expect(await screen.findByRole('group', {
+            name: 'Configure project import',
+        })).toBeInTheDocument();
+        fireEvent.change(importInput, {
+            target: {
+                files: [
+                    new File(['{'], 'invalid-project.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        await waitFor(() => {
+            expect(screen.queryByRole('group', {
+                name: 'Configure project import',
+            })).not.toBeInTheDocument();
+        });
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Selected file could not be read as JSON.',
+        );
+    });
+
     it('restores valid v1 JSON by migrating it into v2 state', async () => {
         localStorage.clear();
         seedPlannerDataV2();
@@ -2188,7 +2468,116 @@ describe('App integration', () => {
         });
     });
 
-    it('rejects malformed v2 restore and upload payloads with duplicate linked buckets', async () => {
+    it('persists a validated Restore recovery across remount and Undo restores the exact prior planner', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const { unmount } = render(<App />);
+        expandSidebarSection('Data');
+
+        fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerFixture)], 'replacement.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        fireEvent.click(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        }));
+
+        await waitFor(() => {
+            expect(localStorage.getItem(RESTORE_RECOVERY_STORAGE_KEY)).not.toBeNull();
+            expect(readRuntimePlannerData().projects).toHaveLength(1);
+        });
+
+        unmount();
+        render(<App />);
+        expandSidebarSection('Data');
+        fireEvent.click(screen.getByRole('button', { name: 'Undo restore' }));
+
+        await waitFor(() => {
+            expect(readRuntimePlannerData()).toEqual(plannerV2Fixture);
+            expect(localStorage.getItem(RESTORE_RECOVERY_STORAGE_KEY)).toBeNull();
+        });
+        expect(screen.queryByRole('button', {
+            name: 'Undo restore',
+        })).not.toBeInTheDocument();
+    });
+
+    it('aborts Restore without changing data when a recovery snapshot cannot be saved', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
+        vi.spyOn(window.localStorage, 'setItem').mockImplementation((key, value) => {
+            if (key === RESTORE_RECOVERY_STORAGE_KEY) {
+                throw new Error('synthetic storage failure');
+            }
+            originalSetItem(key, value);
+        });
+
+        render(<App />);
+        expandSidebarSection('Data');
+        fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerFixture)], 'replacement.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        fireEvent.click(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        }));
+
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Restore was not started because a recovery snapshot could not be saved locally.',
+        );
+        expect(screen.getByRole('button', {
+            name: 'Confirm restore',
+        })).toBeInTheDocument();
+        expect(readRuntimePlannerData()).toEqual(plannerV2Fixture);
+        expect(localStorage.getItem(RESTORE_RECOVERY_STORAGE_KEY)).toBeNull();
+    });
+
+    it('retires stale Restore recovery after a later planner edit', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        render(<App />);
+        expandSidebarSection('Data');
+
+        fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerFixture)], 'replacement.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        fireEvent.click(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        }));
+        expect(await screen.findByRole('button', {
+            name: 'Undo restore',
+        })).toBeInTheDocument();
+
+        fireEvent.click(screen.getByLabelText(
+            'Mark "Write launch summary" complete',
+        ));
+
+        await waitFor(() => {
+            expect(localStorage.getItem(RESTORE_RECOVERY_STORAGE_KEY)).toBeNull();
+            expect(screen.queryByRole('button', {
+                name: 'Undo restore',
+            })).not.toBeInTheDocument();
+        });
+        expect(readRuntimePlannerData().tasks[0].completed).toBe(true);
+    });
+
+    it('rejects malformed v2 Restore and project-import payloads with duplicate linked buckets', async () => {
         localStorage.clear();
         seedPlannerDataV2(plannerV2ScopedExportFixture);
 
@@ -2236,14 +2625,14 @@ describe('App integration', () => {
         });
         expect(screen.queryByRole('button', { name: 'Confirm restore' })).not.toBeInTheDocument();
 
-        fireEvent.change(screen.getByLabelText('Upload planner data from JSON'), {
+        fireEvent.change(screen.getByLabelText('Import a project from JSON'), {
             target: { files: [malformedFile] },
         });
 
         await waitFor(() => {
-            expect(screen.getByText(/not a valid/i)).toBeInTheDocument();
+            expect(screen.getByText(/not a valid|invalid/i)).toBeInTheDocument();
         });
-        expect(screen.queryByRole('button', { name: 'Confirm upload' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Confirm project import' })).not.toBeInTheDocument();
     });
 
     it('applies a template to the active project and supports undo and redo', async () => {
