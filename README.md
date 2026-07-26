@@ -33,8 +33,10 @@ The Windows desktop shell is implemented in [#39](https://github.com/Nobodyworld
 
 Continue exporting JSON backups. To migrate data from the browser, choose the
 **All data** export scope in the browser application, export the JSON, and then
-**Restore** that raw full-planner file in the desktop application. Project,
-bucket, and Unassigned exports are exchange files rather than full backups. See
+**Restore** that raw full-planner file in the desktop application. Newly
+generated Project, Bucket, and Unassigned exports use a versioned scope tag and
+are exchange files rather than full backups; Restore refuses them and directs
+you to **Import project JSON**. Legacy raw v1/v2 backups remain compatible. See
 [Desktop distribution](docs/DESKTOP.md) for prerequisites, installation, and
 current limitations.
 
@@ -97,10 +99,15 @@ Template workflow:
 Data and safety controls:
 
 - Readable project Markdown and structured bucket JSON copy
-- All-data, project, bucket, and Unassigned JSON export scopes
+- Raw All-data backups plus scope-tagged Project, Bucket, and Unassigned JSON
+  exchange exports
 - Explicit source and new/existing destination choices for project import
+- Frozen, one-to-one import reuse that preserves duplicate-named source
+  templates, definitions, buckets, and task mappings
+- Task import skips only exact semantic duplicates, including task state and
+  normalized resource tags
 - Full-planner Restore with confirmation, a pre-replacement recovery snapshot,
-  and operation-specific Undo
+  operation-specific Undo, and scoped-exchange rejection
 - Undo/redo history around reducer actions
 
 UX controls:

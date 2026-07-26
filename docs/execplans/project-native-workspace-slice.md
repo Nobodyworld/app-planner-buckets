@@ -1,22 +1,42 @@
 # Project-native workspace slice execution plan
 
-Status: implementation and automated validation complete; owner physical
-acceptance pending
+Status: issue #63 correction and full local automated validation complete;
+commit/push, exact installer build, hosted CI, and owner physical acceptance
+pending
 Primary issue: #61
+Correction issue: #63
+Separate dependency issue: #64 (no dependency changes in this correction)
 Included issues: #59, #56, #47, #50, #51, #52, #53, #46
 Branch: `slice/project-native-workspace`
 Starting commit: `d83c2f9fbbb745815fab1d4e6ced8d07e51913ea`
+Correction starting commit: `ef47435515cb616a017ce1b1cada5c8aef421a2c`
 
 ## Completion evidence
 
 Implementation was delivered as independently reviewable commits:
 
+- `bc5989a` — execution plan for the project-native workspace slice
 - `59a84e2` — two-axis board navigation and nine-step percentage zoom
 - `7d252eb` — project/bucket-aware Quick Add and sidebar disclosures
 - `2ee2170` — explicit task and bucket selection
 - `1805eff` — deterministic project/bucket copy and scoped export
 - `e0731d8` — explicit project import plus recoverable full Restore
 - `da229b5` — exact latest-paste Undo and bucket-action polish
+- `ef47435` — workflow documentation and physical-acceptance handoff
+
+Issue #63 correction work at the current checkpoint:
+
+- `7019240` — strict scoped exchange, frozen one-to-one import reuse, exact task
+  fingerprints, and synthetic regressions
+- Project, Bucket, and Unassigned now use one strict versioned scope envelope;
+  only All data is newly generated as raw schema-v2 data.
+- Restore rejects current scoped envelopes and the legacy project envelope before
+  replacement; Import accepts both wrappers plus supported raw v1/v2 files.
+- Import reuse candidates come only from frozen pre-import destination snapshots
+  and are consumed one-to-one.
+- Task duplicate checks use the complete semantic state fingerprint.
+- Focused synthetic validation: 3 test files and 128 tests passed; TypeScript and
+  the Vite production build passed.
 
 Final pre-packaging validation on 2026-07-25:
 
@@ -31,6 +51,24 @@ Final pre-packaging validation on 2026-07-25:
   -- -D warnings`: passed
 - `cargo test --manifest-path src-tauri/Cargo.toml`: passed; the desktop crate
   currently contains zero Rust unit or documentation tests
+
+Issue #63 correction validation on 2026-07-26:
+
+- focused correction suites: 3 files and 128 synthetic tests passed
+- pre-clean-install `npm run verify`: 27 files and 489 tests passed; TypeScript
+  and the Vite production build passed
+- `npm ci`: 160 packages installed; 161 packages audited
+- post-clean-install `npm run verify`: 27 files and 489 tests passed; TypeScript
+  and the Vite production build passed
+- `npm audit --json`: one high-severity transitive `postcss` advisory,
+  `GHSA-r28c-9q8g-f849`; zero critical, moderate, low, or informational findings;
+  remediation remains exclusively owned by #64
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: passed
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+  -- -D warnings`: passed
+- `cargo test --manifest-path src-tauri/Cargo.toml`: passed; zero Rust unit or
+  documentation tests
+- `git diff --check`: passed; package manifests and lockfiles are unchanged
 
 The exact committed desktop installer is built and hashed only after the final
 documentation commit is synchronized with the remote branch. Browser/WebView,
@@ -54,6 +92,7 @@ The following remain outside this plan:
 - #40 durable desktop files and backups
 - #41 updater and release publishing
 - #60 physical uninstall/reinstall verification
+- #64 dependency/audit remediation
 - additional hierarchy below project → bucket → task
 
 ## Starting architecture at the recorded baseline
@@ -188,24 +227,26 @@ with an empty `tasks` array. Unassigned uses the explicit name `Unassigned`.
 
 ### JSON export
 
-Existing all-data, bucket, and Unassigned v2 payloads remain supported. A project
-scope contains:
+All data remains a raw schema-v2 full backup. Project, Bucket, and Unassigned use
+the strict version-1 `bsp-planner-scope` exchange envelope. A Project scope
+contains:
 
 - the selected project;
 - only its buckets and tasks, including archived tasks;
 - only template definitions referenced by those buckets;
 - only templates required by those definitions.
 
-Project exports use a tagged, versioned project-exchange envelope around a valid
-schema-v2 data object:
+Every scoped export uses a tagged, versioned envelope around a valid schema-v2
+data object:
 
 ```json
 {
-  "format": "bsp-planner-project",
+  "format": "bsp-planner-scope",
   "envelopeVersion": 1,
-  "sourceProject": {
-    "id": "source-id",
-    "name": "Project name"
+  "scope": {
+    "kind": "project",
+    "projectId": "source-id",
+    "projectName": "Project name"
   },
   "exportedAt": "2026-07-25T06:30:00.000Z",
   "data": {
@@ -229,10 +270,12 @@ schema-v2 data object:
 }
 ```
 
-The nested `data` object passes the existing schema-v2 validator. No schema version
-3 is introduced. The strict envelope lets current code identify a project-only
-file and makes older builds reject it instead of accidentally accepting a partial
-project as a full replacement backup.
+Bucket scope adds exact `bucketId` and `bucketName` metadata and includes one
+bucket, its tasks, and required dependencies. Unassigned scope includes no named
+buckets or dependencies and only null-bucket tasks. Validators require exact
+envelope/scope keys, canonical ISO time, supported kind/format/version, matching
+nested identities, one source project, exact dependency closure, and no unrelated
+records. No schema version 3 is introduced.
 
 Filenames use sanitized lowercase scope/name segments and a UTC timestamp through
 seconds:
@@ -249,11 +292,16 @@ The exact filename is included in a longer-lived notification.
 - Existing v2 localStorage and v1-to-v2 migration behavior is unchanged.
 - The board zoom preference receives a separate percentage key and deterministic
   one-way read migration; no stored planner data migration is required.
-- The tagged project envelope has its own strict validator. Its nested planner data
-  uses the unchanged schema-v2 validator; raw v1/v2 full files remain supported.
+- The current scoped envelope has its own strict validator. Its nested planner
+  data uses the unchanged schema-v2 validator.
+- The legacy version-1 `bsp-planner-project` envelope remains accepted by Project
+  Import and rejected by Restore.
 - Legacy full v1/v2 exports remain valid Restore inputs.
-- A project-only export is rejected by full Restore with guidance to use project
-  import.
+- Project, Bucket, and Unassigned envelopes are rejected by full Restore with
+  guidance to use project import.
+- Older raw scoped exports are indistinguishable from other valid legacy raw
+  planner files and remain accepted for compatibility; newly generated scoped
+  files are always tagged.
 - A legacy full export can be used for project import. A one-project source is
   derived automatically; a multi-project source requires an explicit source
   project choice.
@@ -278,20 +326,33 @@ explicit valid project selection before confirmation.
 
 Dependencies and records are resolved in this order:
 
-1. templates by normalized name, otherwise create;
-2. template definitions by normalized name within the mapped template, otherwise
-   create;
-3. buckets by mapped template definition when unique, then by normalized name
-   only when template-definition relationships are compatible, otherwise create
-   and report a definition conflict;
-4. tasks by destination bucket plus normalized title and description; duplicates
-   are skipped, otherwise create.
+1. templates by compatible normalized name, trimmed description, and active state;
+2. template definitions within the mapped template by compatible normalized name,
+   trimmed description, priority, position, and default-active state;
+3. buckets by a unique mapped template definition, then by normalized name only
+   when definition identity, trimmed description, priority, and pinned state are
+   compatible;
+4. tasks by the exact semantic fingerprint of resolved bucket, normalized title
+   and description, completed, pinned, priority, normalized/sorted resource tags,
+   and normalized archive state/timestamp.
+
+Candidates come only from frozen snapshots of destination templates, definitions,
+destination-project buckets, and destination-project tasks. Created records never
+enter those candidate pools. Consumed template, definition, and bucket IDs enforce
+one-to-one reuse, preserving duplicate-named source identities and bucket task
+maps. Ambiguous/conflicting candidate IDs are sorted with locale-independent
+code-unit ordering.
+
+For the task fingerprint, parseable archive timestamps canonicalize to the UTC
+instant; unparseable legacy strings compare by trimmed literal and `null` remains
+active. Internal ID, project ID, `createdAt`, and `updatedAt` are excluded. Exact
+duplicates are skipped; any state difference imports separately.
 
 Incoming IDs are never trusted as globally unique. Every created record receives a
 collision-safe ID. Imported buckets/tasks receive the chosen destination
 `projectId`, and task `bucketId` values use the resolved bucket map. The summary
 reports project creation/merge, dependency reuse/creation, bucket reuse/creation,
-task creation, and skipped duplicates.
+task creation, skipped exact semantic duplicates, and ambiguity/conflict choices.
 
 ## Implementation sequence and rollback points
 
@@ -358,15 +419,17 @@ Rollback: transient UI-only state can be reverted without persistence changes.
 - Add `Copy project` without changing explicit selection.
 - Add pure project-scope/envelope builders and a filename builder.
 - Add project export scope and longer exact-filename notification.
-- Keep all-data, bucket, and Unassigned scopes validator-compatible.
+- Keep All data as raw schema-v2 and tag Project, Bucket, and Unassigned with the
+  strict general scope envelope.
 
-Rollback: exported files remain valid v2; reverting removes only new UI/scope.
+Rollback: nested data remains valid schema-v2; reverting removes only new
+UI/scope behavior.
 
 ### 6. Project-aware import
 
-- Parse the strict project envelope while retaining raw v1/v2 coercion for legacy
-  full files.
-- Reject project-only files in destructive Restore.
+- Parse the strict current scope envelope and legacy project envelope while
+  retaining raw v1/v2 coercion.
+- Reject every supported scoped wrapper in destructive Restore.
 - Add source-project and destination-mode controls.
 - Implement create/merge transforms as pure validated functions.
 - Report created, reused/merged, and skipped records explicitly.
@@ -397,6 +460,21 @@ undo affordance and action layout.
 - Record automated counts and audit state.
 
 Rollback: tests/docs follow the independently revertible feature commits.
+
+### 9. Issue #63 scoped-exchange and import-identity correction
+
+- Tag every newly generated Project, Bucket, and Unassigned export.
+- Reserve raw generation for All data while retaining legacy raw compatibility.
+- Freeze pre-import destination candidates and consume reusable dependency/bucket
+  IDs one-to-one.
+- Replace text-only task duplicate matching with the exact semantic fingerprint.
+- Add synthetic regressions for all scope kinds, Restore routing, legacy formats,
+  duplicate-named source identity, consumed candidates, correct task maps,
+  deterministic ambiguities, and state-distinct tasks.
+- Keep dependency remediation in #64 and make no package changes.
+
+Rollback: the correction is isolated after the original eight slice commits and
+does not rewrite planner schema or existing history.
 
 ## Automated test matrix
 
@@ -440,18 +518,23 @@ Rollback: tests/docs follow the independently revertible feature commits.
 - task ordering, checked state, empty buckets, Unassigned
 - filter-independent active content and archived omission in Markdown
 - structured valid bucket JSON and empty Unassigned
-- project envelope excludes unrelated records; nested data validates and includes
-  dependencies
+- all three scoped envelopes use exact scope identity, exclude unrelated records,
+  and include only the required nested closure
 - filename sanitization, reserved/empty fallback, timestamp precision
-- raw export scopes pass schema-v2 validation; project-envelope nested data passes
-  schema-v2 validation and the envelope passes its strict validator
+- only All data is raw; scoped nested data passes schema-v2 validation and each
+  envelope passes the strict general validator
 
 ### Import and paste
 
 - derive a one-project source and require a multi-project choice
 - create-new-project and explicit merge-existing destination
-- duplicate project/bucket/task/dependency reporting
-- project-only Restore rejection and legacy full Restore compatibility
+- duplicate-named source template/definition/bucket preservation and correct task
+  maps
+- frozen reuse candidates, one-to-one consumption, and deterministic ambiguity
+  reporting
+- exact semantic task duplicates plus every required state-distinct case
+- Project/Bucket/Unassigned/legacy-wrapper Restore rejection and legacy raw
+  Restore compatibility
 - paste notice, Keep, timeout, exact-ID Undo, repeated paste
 - project switch, Restore, and deleted destination cleanup
 
@@ -523,9 +606,9 @@ The owner performs these checks against the exact committed installer:
 | Copy independence | Copy unrelated task/bucket while a selection exists | Selection remains intact; paste buffer follows latest Copy |
 | Project copy | Paste into plain text, Markdown, email/chat, and ChatGPT | Stable readable project order with no internal metadata |
 | Bucket copy | Paste into a JSON parser/editor | Valid structured JSON in board order |
-| Export | Inspect a project-only JSON chosen by the owner | No unrelated project records; filename and notice identify scope |
+| Export | Inspect synthetic Project, Bucket, and Unassigned JSON chosen by the owner | Exact scope metadata, no unrelated records, and filename/notice identify scope |
 | Import | Create a project and explicitly merge into an existing project | Correct destination and deterministic summary |
-| Restore | Try a project-only file in full Restore, then a full backup | Project file is refused; full Restore/Undo stays separate |
+| Restore | Try all scoped wrappers in full Restore, then an All data backup | Scoped files are refused; full Restore/Undo stays separate |
 | Paste | Paste, Keep, Undo, repeat, and switch projects | Only latest pasted IDs can be undone; stale notice clears |
 | Regression | Task/bucket drag, edge autoscroll, pin, completion, archive | Existing interactions and persistence remain intact |
 | Themes/motion | Light, dark, and reduced motion | Controls remain visible and motion preference is respected |
@@ -541,8 +624,12 @@ The owner performs these checks against the exact committed installer:
   scroll for long columns, while edge chaining and the board frame provide access
   to the complete scaled column.
 - Import can corrupt relational identity if IDs or template references are copied
-  directly. All created records use mapped collision-safe IDs and final results
-  pass the existing integrity validator before dispatch.
+  directly or if created records become later name-match candidates. All created
+  records use mapped collision-safe IDs; reuse is frozen and one-to-one; final
+  results pass the existing integrity validator before dispatch.
+- Older raw scoped files cannot be distinguished from legacy full raw files.
+  Current exports carry explicit scope tags, while Restore retains raw v1/v2
+  compatibility and the documentation directs routine backup use to All data.
 - Full exports with multiple projects are ambiguous as project-import sources.
   Confirmation is disabled until the source project and destination are explicit.
 - Clipboard writes can fail. UI success is reported only after the shared clipboard

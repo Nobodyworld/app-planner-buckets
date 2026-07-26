@@ -185,10 +185,10 @@ is shown in a dismissible notification long enough to identify the result.
 
 | Scope | Payload | Filename pattern |
 | --- | --- | --- |
-| All data | Raw schema-v2 data for every project and dependency | `bsp-planner-all-YYYY-MM-DD-HHmmss.json` |
-| Project | Tagged project envelope containing one project | `bsp-planner-project-project-name-YYYY-MM-DD-HHmmss.json` |
-| Bucket | Raw schema-v2 data for one named bucket and its project context | `bsp-planner-bucket-bucket-name-YYYY-MM-DD-HHmmss.json` |
-| Unassigned | Raw schema-v2 data for one project's Unassigned tasks | `bsp-planner-unassigned-YYYY-MM-DD-HHmmss.json` |
+| All data | Raw schema-v2 full backup containing every project and dependency | `bsp-planner-all-YYYY-MM-DD-HHmmss.json` |
+| Project | Versioned scope envelope containing one complete project closure | `bsp-planner-project-project-name-YYYY-MM-DD-HHmmss.json` |
+| Bucket | Versioned scope envelope containing one named bucket closure | `bsp-planner-bucket-bucket-name-YYYY-MM-DD-HHmmss.json` |
+| Unassigned | Versioned scope envelope containing one project's null-bucket tasks | `bsp-planner-unassigned-YYYY-MM-DD-HHmmss.json` |
 
 Timestamps are UTC through seconds. Scope and name segments are lowercase and
 sanitized: Windows-invalid characters and control characters are removed,
@@ -196,15 +196,31 @@ diacritics are normalized, repeated separators collapse, and trailing dots or
 spaces are removed. Empty or Windows-reserved names use a deterministic
 `untitled` fallback.
 
-A project export contains:
+Every newly generated Project, Bucket, and Unassigned export uses
+`format: "bsp-planner-scope"` and `envelopeVersion: 1`. The exact `scope` object
+contains the discriminator and source identity:
 
-- exactly one project, with its name visible in `sourceProject`;
+- Project: `kind`, `projectId`, and `projectName`;
+- Bucket: those project fields plus `bucketId` and `bucketName`; and
+- Unassigned: `kind`, `projectId`, and `projectName`.
+
+A Project export contains:
+
+- exactly one project, with its ID and name repeated in `scope`;
 - that project's buckets and all of its tasks, including archived tasks; and
 - only the template definitions referenced by those buckets and the templates
   required by those definitions.
 
-It excludes every unrelated project, bucket, task, template definition, and
-template. The nested `data` value is valid schema-v2 planner data.
+A Bucket export contains exactly one named bucket, every task assigned to it
+including archived tasks, and only its required template closure. An Unassigned
+export contains no named bucket or template records and only tasks whose
+`bucketId` is `null`.
+
+Every scoped builder excludes unrelated projects and records. The strict
+validator requires exact envelope and scope keys, a canonical ISO timestamp,
+supported format/version/kind values, matching project and bucket identities,
+valid nested schema-v2 relationships, and an exact required-template closure.
+No planner schema version 3 is introduced.
 
 ## Project import and full Restore are different
 
@@ -212,18 +228,19 @@ The file shape determines the safe workflow:
 
 | Workflow | Accepted source | Effect |
 | --- | --- | --- |
-| **Import project JSON** | A tagged project envelope, or a raw v1/v2 file from which a source project can be selected | Adds one project or merges it into one explicitly selected project |
-| **Restore from JSON backup** | Raw validated v1/v2 planner data | Replaces the complete current planner |
+| **Import project JSON** | A current scoped envelope, a legacy `bsp-planner-project` envelope, or a supported raw v1/v2 file from which a source project can be selected | Adds one project or merges it into one explicitly selected project |
+| **Restore from JSON backup** | Raw validated v1/v2 planner data; among newly generated files, only **All data** has this shape | Replaces the complete current planner |
 
-Project exports use this tagged wrapper:
+Current scoped exports use this tagged wrapper:
 
 ```json
 {
-  "format": "bsp-planner-project",
+  "format": "bsp-planner-scope",
   "envelopeVersion": 1,
-  "sourceProject": {
-    "id": "source-project-id",
-    "name": "Website launch"
+  "scope": {
+    "kind": "project",
+    "projectId": "source-project-id",
+    "projectName": "Website launch"
   },
   "exportedAt": "2026-07-25T06:30:00.000Z",
   "data": {
@@ -247,18 +264,24 @@ Project exports use this tagged wrapper:
 }
 ```
 
-The project envelope is intentionally not a full Restore payload. Restore rejects
-it and directs the user to **Import project JSON**, preventing a one-project file
-from replacing unrelated planner data. Legacy raw v1/v2 backups remain Restore
-compatible. Use an all-data export—not a project, bucket, or Unassigned scope—as
-the routine full-planner backup.
+Restore rejects Project, Bucket, and Unassigned scope envelopes before creating a
+replacement confirmation or recovery snapshot, and directs the user to
+**Import project JSON**. It also rejects the legacy version-1
+`bsp-planner-project` wrapper, which Project Import continues to accept.
+
+Legacy raw v1/v2 backups remain Restore- and Project-Import-compatible. Older
+builds could generate raw Bucket or Unassigned files that are structurally
+indistinguishable from other legacy raw planner data, so compatibility requires
+Restore to continue accepting them. Newly generated scoped files are always
+tagged and cannot masquerade as a new full backup. Use **All data** as the routine
+full-planner backup.
 
 ### Choose the source and destination
 
-A project envelope identifies exactly one source. A raw file with one project
-selects that source automatically. A raw file with several projects requires an
-explicit source-project choice; matching names are disambiguated rather than
-guessed.
+A scoped envelope or legacy project envelope identifies exactly one source. A
+raw file with one project selects that source automatically. A raw file with
+several projects requires an explicit source-project choice; matching names are
+disambiguated rather than guessed.
 
 Then choose one destination:
 
@@ -271,29 +294,59 @@ Then choose one destination:
 
 ### Matching and duplicate rules
 
-Text matching trims and normalizes case. Import processes dependencies before
-content:
+Before importing any dependency or bucket, the importer freezes snapshots of the
+destination templates, template definitions, destination-project buckets, and
+destination-project tasks. Only those pre-import records may be reused. Created
+records never become candidates for a later distinct source entity, and consumed
+template, definition, and bucket IDs enforce one-to-one reuse.
 
-1. A uniquely matching template name is reused; otherwise a template is created.
-2. A uniquely matching definition name within the resolved template is reused;
-   otherwise a definition is created.
-3. A bucket first reuses a unique mapped template-definition match. It reuses a
-   unique normalized-name match only when the existing and incoming
-   template-definition relationships are compatible. A same-name bucket with a
-   null/different definition conflict is not reused; a new bucket is created and
-   the conflict is reported.
-4. A task is a duplicate only when its resolved destination bucket and normalized
-   title and description match. Duplicate tasks are skipped.
+Text names trim and normalize case. Import processes dependencies before content:
+
+1. A template reuses one unconsumed frozen candidate only when normalized name,
+   trimmed description, and active state are compatible; otherwise it creates a
+   fresh template and reports any name conflict.
+2. A definition resolves its mapped template first. It reuses one unconsumed
+   frozen definition only when normalized name, trimmed description, priority,
+   position, and default-active state are compatible; otherwise it creates a
+   fresh definition and reports the conflict.
+3. A bucket first reuses one unconsumed frozen bucket for its uniquely mapped
+   template definition. Name-based fallback additionally requires compatible
+   mapped-definition identity, trimmed description, priority, and pinned state.
+   Conflicts or consumed candidates produce a fresh bucket, preserving each
+   source bucket's task map.
+4. A task is skipped only when this exact semantic fingerprint already exists in
+   the frozen destination tasks or earlier in the same source import:
+
+   ```text
+   JSON.stringify([
+     resolved destination bucket ID,
+     normalized title,
+     normalized description,
+     completed,
+     pinned,
+     priority,
+     normalized and sorted resource tags,
+     normalized archived timestamp
+   ])
+   ```
+
+   Title and description comparison trims and normalizes case. Resource tags are
+   trimmed, lowercased, deduplicated, and code-unit sorted. `null` archive time
+   means active. Any parseable archive timestamp is canonicalized to its UTC
+   instant; an unparseable legacy string uses its trimmed literal. Internal ID,
+   source/destination project ID, `createdAt`, and `updatedAt` are excluded.
+   State-distinct tasks therefore import separately.
 
 Ambiguous name matches are never selected arbitrarily. Import creates a separate
-record when that is safe and reports the ambiguity. An invalid or ambiguous
-relational destination that cannot preserve schema integrity is rejected.
+record when that is safe and reports canonically sorted candidate IDs. An invalid
+or ambiguous relational destination that cannot preserve schema integrity is
+rejected.
 
 Created records receive fresh collision-safe IDs and the selected destination
 project ID. Imported tasks preserve their completion, archive, pin, priority, tag,
 title, and description state. The completion summary reports project
 creation/merge, dependency and bucket creation/reuse, created tasks, skipped
-duplicates, and any ambiguity decisions.
+exact semantic duplicates, and any ambiguity or conflict decisions.
 
 ## Recoverable full Restore
 
@@ -393,15 +446,16 @@ dragging, clipboard integration, focus, or installer behavior.
 - [ ] Paste a named bucket and Unassigned into a JSON parser; verify valid JSON,
   stable task order, explicit names, and empty-array behavior.
 - [ ] Export All data, Project, Bucket, and Unassigned; verify the exact
-  scope-specific UTC filename, notification, valid JSON, and absence of unrelated
-  records in the project envelope.
-- [ ] Import a project envelope as a new project and into an explicitly selected
-  existing project; verify activation, fresh IDs, preserved task state, and the
-  created/reused/skipped summary.
+  scope-specific UTC filename, notification, valid JSON, scope identity, and
+  absence of unrelated records in every scoped envelope.
+- [ ] Import each scoped envelope kind as a new project and into an explicitly
+  selected existing project; verify activation, fresh IDs, preserved task state,
+  and the created/reused/skipped summary.
 - [ ] Import a synthetic raw multi-project file and confirm that source and
   destination ambiguity blocks confirmation until both choices are explicit.
-- [ ] Offer a project envelope to Restore and confirm it is refused; then Restore
-  a synthetic full backup and use Undo Restore before making another edit.
+- [ ] Offer synthetic Project, Bucket, Unassigned, and legacy project envelopes
+  to Restore and confirm each is refused; then Restore a synthetic All data
+  backup and use Undo Restore before making another edit.
 - [ ] After another Restore, make a planner edit and confirm the old recovery
   action cannot discard that newer work.
 - [ ] Paste tasks and test Keep, Undo, timeout, repeated paste, an independently
