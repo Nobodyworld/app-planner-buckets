@@ -12,8 +12,11 @@ import type { PlannerDataV2, PlannerTaskV2 } from './types/v2';
 import { PLANNER_DATA_V2_VERSION } from './types/v2';
 import { isValidPlannerDataV2 } from './types/validators';
 import {
+    buildPlannerScopedExchangeEnvelope,
     buildProjectExchangeEnvelope,
+    isValidPlannerScopedExchangeEnvelope,
     isValidProjectExchangeEnvelope,
+    type PlannerScopedExchangeEnvelope,
     type ProjectExchangeEnvelope,
 } from './services/plannerExport';
 import { RESTORE_RECOVERY_STORAGE_KEY } from './services/restoreRecovery';
@@ -762,6 +765,9 @@ describe('App integration', () => {
         const importButton = screen.getByRole('button', { name: 'Import project JSON' });
         const restoreButton = screen.getByRole('button', { name: 'Restore from JSON backup' });
 
+        expect(screen.getByText(/Export All data for a full backup/)).toHaveTextContent(
+            'Project, bucket, and Unassigned scopes are exchange files for Project import.',
+        );
         expect(exportButton.compareDocumentPosition(scopeButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(scopeButton.compareDocumentPosition(importButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
         expect(importButton.compareDocumentPosition(restoreButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -2291,14 +2297,15 @@ describe('App integration', () => {
             'Export started — check your default Downloads folder for bsp-planner-project-beta-2026-07-25-063000.json.',
         );
         expect(exportedBlob).not.toBeNull();
-        const envelope = JSON.parse(await exportedBlob!.text()) as ProjectExchangeEnvelope;
-        expect(isValidProjectExchangeEnvelope(envelope)).toBe(true);
+        const envelope = JSON.parse(await exportedBlob!.text()) as PlannerScopedExchangeEnvelope;
+        expect(isValidPlannerScopedExchangeEnvelope(envelope)).toBe(true);
         expect(envelope).toMatchObject({
-            format: 'bsp-planner-project',
+            format: 'bsp-planner-scope',
             envelopeVersion: 1,
-            sourceProject: {
-                id: 'project-b',
-                name: 'Beta',
+            scope: {
+                kind: 'project',
+                projectId: 'project-b',
+                projectName: 'Beta',
             },
             exportedAt: '2026-07-25T06:30:00.000Z',
         });
@@ -2319,6 +2326,60 @@ describe('App integration', () => {
         expect(JSON.stringify(envelope)).not.toContain('project-a');
         expect(JSON.stringify(envelope)).not.toContain('project-c');
         expect(JSON.stringify(envelope)).not.toContain('template-support');
+    });
+
+    it('exports Unassigned as a tagged exchange envelope while preserving its filename', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-25T06:30:00.000Z'));
+        let exportedBlob: Blob | null = null;
+        let downloadedFilename = '';
+        Object.defineProperty(URL, 'createObjectURL', {
+            value: vi.fn((blob: Blob) => {
+                exportedBlob = blob;
+                return 'blob:planner-unassigned-export';
+            }),
+            configurable: true,
+        });
+        Object.defineProperty(URL, 'revokeObjectURL', {
+            value: vi.fn(),
+            configurable: true,
+        });
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+            this: HTMLAnchorElement,
+        ) {
+            downloadedFilename = this.download;
+        });
+
+        render(<App />);
+        expandSidebarSection('Projects');
+        fireEvent.change(screen.getByLabelText('Active project'), {
+            target: { value: 'project-a' },
+        });
+        expandSidebarSection('Data');
+        fireEvent.click(screen.getByRole('button', { name: 'Choose export scope' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Unassigned tasks' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
+
+        expect(downloadedFilename).toBe(
+            'bsp-planner-unassigned-2026-07-25-063000.json',
+        );
+        expect(exportedBlob).not.toBeNull();
+        const envelope = JSON.parse(
+            await exportedBlob!.text(),
+        ) as PlannerScopedExchangeEnvelope;
+        expect(isValidPlannerScopedExchangeEnvelope(envelope)).toBe(true);
+        expect(envelope.scope).toEqual({
+            kind: 'unassigned',
+            projectId: 'project-a',
+            projectName: 'Alpha',
+        });
+        expect(envelope.data.buckets).toEqual([]);
+        expect(envelope.data.tasks.map((task) => task.id)).toEqual([
+            'task-alpha-unassigned',
+        ]);
+        expect(envelope.data.tasks.every((task) => task.bucketId === null)).toBe(true);
     });
 
     it('imports a tagged project export as a new remapped project only after an explicit destination choice', async () => {
@@ -2382,7 +2443,9 @@ describe('App integration', () => {
         expect(screen.getByRole('status')).toHaveTextContent(
             'Imported "Alpha" into "Alpha (imported)"',
         );
-        expect(screen.getByRole('status')).toHaveTextContent('skipped 0 duplicate task(s)');
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'skipped 0 exact semantic duplicate task(s)',
+        );
     });
 
     it('requires an explicit source for raw multi-project imports and imports only that closure', async () => {
@@ -2485,15 +2548,36 @@ describe('App integration', () => {
         expect(screen.getByRole('status')).toHaveTextContent(
             'Imported "Beta" into "Beta"',
         );
-        expect(screen.getByRole('status')).toHaveTextContent('skipped 1 duplicate task(s)');
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'skipped 1 exact semantic duplicate task(s)',
+        );
     });
 
-    it('routes valid and malformed tagged project exports away from destructive Restore', async () => {
+    it('routes scoped envelopes away from Restore while accepting validator-compatible raw backups', async () => {
         localStorage.clear();
         seedPlannerDataV2(plannerV2Fixture);
-        const envelope = buildProjectExchangeEnvelope(
+        const legacyProjectEnvelope = buildProjectExchangeEnvelope(
             plannerV2Fixture,
             'project-a',
+            '2026-07-25T06:30:00.000Z',
+        );
+        const scopedProjectEnvelope = buildPlannerScopedExchangeEnvelope(
+            plannerV2Fixture,
+            { kind: 'project', projectId: 'project-a' },
+            '2026-07-25T06:30:00.000Z',
+        );
+        const scopedBucketEnvelope = buildPlannerScopedExchangeEnvelope(
+            plannerV2Fixture,
+            {
+                kind: 'bucket',
+                projectId: 'project-a',
+                bucketId: 'bucket-alpha',
+            },
+            '2026-07-25T06:30:00.000Z',
+        );
+        const scopedUnassignedEnvelope = buildPlannerScopedExchangeEnvelope(
+            plannerV2Fixture,
+            { kind: 'unassigned', projectId: 'project-a' },
             '2026-07-25T06:30:00.000Z',
         );
 
@@ -2502,8 +2586,18 @@ describe('App integration', () => {
         const restoreInput = screen.getByLabelText('Restore planner data from JSON');
 
         for (const [filename, payload] of [
-            ['valid-project.json', envelope],
-            ['malformed-project.json', { ...envelope, envelopeVersion: 99 }],
+            ['project-scope.json', scopedProjectEnvelope],
+            ['bucket-scope.json', scopedBucketEnvelope],
+            ['unassigned-scope.json', scopedUnassignedEnvelope],
+            ['legacy-project.json', legacyProjectEnvelope],
+            [
+                'malformed-scope.json',
+                { ...scopedBucketEnvelope, envelopeVersion: 99 },
+            ],
+            [
+                'malformed-legacy-project.json',
+                { ...legacyProjectEnvelope, envelopeVersion: 99 },
+            ],
         ] as const) {
             fireEvent.change(restoreInput, {
                 target: {
@@ -2516,7 +2610,7 @@ describe('App integration', () => {
             });
             await waitFor(() => {
                 expect(screen.getByRole('status')).toHaveTextContent(
-                    'This is a project export. Use Import project JSON instead',
+                    'Scoped exchange files cannot be restored. Use Import project JSON instead',
                 );
             });
             expect(screen.queryByRole('button', {
@@ -2524,6 +2618,28 @@ describe('App integration', () => {
             })).not.toBeInTheDocument();
         }
 
+        const rawBackupWithLegacyMetadata = {
+            ...plannerV2Fixture,
+            scope: 'legacy metadata',
+            format: 'legacy-raw-backup',
+            envelopeVersion: 'legacy metadata',
+            sourceProject: 'legacy metadata',
+            data: 'legacy metadata',
+        };
+        fireEvent.change(restoreInput, {
+            target: {
+                files: [
+                    new File(
+                        [JSON.stringify(rawBackupWithLegacyMetadata)],
+                        'legacy-raw-v2.json',
+                        { type: 'application/json' },
+                    ),
+                ],
+            },
+        });
+        expect(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        })).toBeInTheDocument();
         expect(readRuntimePlannerData()).toEqual(plannerV2Fixture);
     });
 
@@ -2904,7 +3020,7 @@ describe('App integration', () => {
         expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
     });
 
-    it('exports scoped template-derived bucket and restores it through UI as valid v2 data', async () => {
+    it('exports a tagged template-derived bucket, refuses Restore, and routes it to Project import', async () => {
         localStorage.clear();
         seedPlannerDataV2(plannerV2ScopedExportFixture);
         let exportedBlob: Blob | null = null;
@@ -2934,41 +3050,62 @@ describe('App integration', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
 
         expect(exportedBlob).not.toBeNull();
-        const exported = JSON.parse(await exportedBlob!.text()) as PlannerDataV2;
+        const exported = JSON.parse(
+            await exportedBlob!.text(),
+        ) as PlannerScopedExchangeEnvelope;
 
-        expect(exported.projects.map((project) => project.id)).toEqual(['project-b']);
-        expect(exported.buckets.map((bucket) => bucket.id)).toEqual(['bucket-beta-ready-linked']);
-        expect(exported.tasks.map((task) => task.id).sort()).toEqual(['task-beta-ready-1', 'task-beta-ready-2']);
-        expect(exported.templateDefinitions.map((definition) => definition.id)).toEqual(['definition-launch-ready']);
-        expect(exported.templates.map((template) => template.id)).toEqual(['template-launch']);
+        expect(isValidPlannerScopedExchangeEnvelope(exported)).toBe(true);
+        expect(exported.scope).toEqual({
+            kind: 'bucket',
+            projectId: 'project-b',
+            projectName: 'Beta',
+            bucketId: 'bucket-beta-ready-linked',
+            bucketName: 'Beta Ready Lane',
+        });
+        expect(exported.data.projects.map((project) => project.id)).toEqual(['project-b']);
+        expect(exported.data.buckets.map((bucket) => bucket.id)).toEqual(['bucket-beta-ready-linked']);
+        expect(exported.data.tasks.map((task) => task.id).sort()).toEqual(['task-beta-ready-1', 'task-beta-ready-2']);
+        expect(exported.data.templateDefinitions.map((definition) => definition.id)).toEqual(['definition-launch-ready']);
+        expect(exported.data.templates.map((template) => template.id)).toEqual(['template-launch']);
 
-        expect(exported.projects.some((project) => project.id === 'project-a')).toBe(false);
-        expect(exported.projects.some((project) => project.id === 'project-c')).toBe(false);
-        expect(exported.buckets.some((bucket) => bucket.id === 'bucket-beta-manual')).toBe(false);
-        expect(exported.tasks.some((task) => task.id === 'task-beta-manual')).toBe(false);
-        expect(exported.templates.some((template) => template.id === 'template-support')).toBe(false);
-        expect(exported.templateDefinitions.some((definition) => definition.id === 'definition-support-triage')).toBe(false);
-
-        expect(isValidPlannerDataV2(exported)).toBe(true);
+        expect(exported.data.projects.some((project) => project.id === 'project-a')).toBe(false);
+        expect(exported.data.projects.some((project) => project.id === 'project-c')).toBe(false);
+        expect(exported.data.buckets.some((bucket) => bucket.id === 'bucket-beta-manual')).toBe(false);
+        expect(exported.data.tasks.some((task) => task.id === 'task-beta-manual')).toBe(false);
+        expect(exported.data.templates.some((template) => template.id === 'template-support')).toBe(false);
+        expect(exported.data.templateDefinitions.some((definition) => definition.id === 'definition-support-triage')).toBe(false);
 
         const restoreFile = new File([JSON.stringify(exported)], 'scoped-export.json', { type: 'application/json' });
         fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
             target: { files: [restoreFile] },
         });
         await waitFor(() => {
-            expect(screen.getByText('Restore 2 task(s) and 1 bucket(s) and replace current planner?')).toBeInTheDocument();
+            expect(screen.getByText(
+                /Scoped exchange files cannot be restored/,
+            )).toHaveTextContent(
+                'Scoped exchange files cannot be restored. Use Import project JSON instead',
+            );
         });
-        fireEvent.click(screen.getByRole('button', { name: 'Confirm restore' }));
+        expect(screen.queryByRole('button', { name: 'Confirm restore' })).not.toBeInTheDocument();
+        expect(readRuntimePlannerData()).toEqual(plannerV2ScopedExportFixture);
+        expect(localStorage.getItem(RESTORE_RECOVERY_STORAGE_KEY)).toBeNull();
 
-        await waitFor(() => {
-            const restored = readRuntimePlannerData();
-            expect(isValidPlannerDataV2(restored)).toBe(true);
-            expect(restored.projects.map((project) => project.id)).toEqual(['project-b']);
-            expect(restored.buckets.map((bucket) => bucket.id)).toEqual(['bucket-beta-ready-linked']);
-            expect(restored.tasks.map((task) => task.id).sort()).toEqual(['task-beta-ready-1', 'task-beta-ready-2']);
-            expect(restored.templateDefinitions.map((definition) => definition.id)).toEqual(['definition-launch-ready']);
-            expect(restored.templates.map((template) => template.id)).toEqual(['template-launch']);
+        fireEvent.change(screen.getByLabelText('Import a project from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(exported)], 'scoped-export.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
         });
+        const config = await screen.findByRole('group', {
+            name: 'Configure project import',
+        });
+        expect(within(config).getByText('Scoped exchange export ready to import.')).toBeInTheDocument();
+        expect(within(config).getByText(/Source project:/)).toHaveTextContent(
+            'Source project: Beta',
+        );
     });
 
     it('syncs definition rename through persistence and undo/redo', async () => {
@@ -3114,7 +3251,7 @@ describe('App integration', () => {
         expect(exported.templates.map((template) => template.id)).toEqual(['template-launch']);
         expect(exported.templateDefinitions.map((definition) => definition.id)).toEqual(['definition-ready', 'definition-done']);
 
-        const restoreFile = new File([JSON.stringify(plannerV2TemplateFixture)], 'templates.json', { type: 'application/json' });
+        const restoreFile = new File([JSON.stringify(exported)], 'templates.json', { type: 'application/json' });
         fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
             target: { files: [restoreFile] },
         });

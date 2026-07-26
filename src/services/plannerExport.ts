@@ -10,6 +10,8 @@ import { isValidPlannerDataV2 } from '../types/validators';
 
 export const PROJECT_EXCHANGE_FORMAT = 'bsp-planner-project' as const;
 export const PROJECT_EXCHANGE_ENVELOPE_VERSION = 1 as const;
+export const PLANNER_SCOPED_EXCHANGE_FORMAT = 'bsp-planner-scope' as const;
+export const PLANNER_SCOPED_EXCHANGE_ENVELOPE_VERSION = 1 as const;
 
 export interface ProjectExchangeEnvelope {
   format: typeof PROJECT_EXCHANGE_FORMAT;
@@ -22,8 +24,41 @@ export interface ProjectExchangeEnvelope {
   data: PlannerDataV2;
 }
 
-export type RawPlannerExportScope =
-  | { kind: 'all' }
+export type PlannerScopedExchangeScope =
+  | {
+    kind: 'project';
+    projectId: string;
+    projectName: string;
+  }
+  | {
+    kind: 'bucket';
+    projectId: string;
+    projectName: string;
+    bucketId: string;
+    bucketName: string;
+  }
+  | {
+    kind: 'unassigned';
+    projectId: string;
+    projectName: string;
+  };
+
+export interface PlannerScopedExchangeEnvelope {
+  format: typeof PLANNER_SCOPED_EXCHANGE_FORMAT;
+  envelopeVersion: typeof PLANNER_SCOPED_EXCHANGE_ENVELOPE_VERSION;
+  scope: PlannerScopedExchangeScope;
+  exportedAt: string;
+  data: PlannerDataV2;
+}
+
+export type PlannerScopedExchangeBuildScope =
+  | { kind: 'project'; projectId: string }
+  | { kind: 'bucket'; projectId: string; bucketId: string }
+  | { kind: 'unassigned'; projectId: string };
+
+export type RawPlannerExportScope = { kind: 'all' };
+
+type ScopedPlannerDataSelection =
   | { kind: 'bucket'; projectId: string; bucketId: string }
   | { kind: 'unassigned'; projectId: string };
 
@@ -106,6 +141,28 @@ const validateBuiltPlannerData = (data: PlannerDataV2): PlannerDataV2 => {
   return data;
 };
 
+const hasExactReferencedTemplateClosure = (data: PlannerDataV2): boolean => {
+  const referencedDefinitionIds = new Set(
+    data.buckets.flatMap((bucket) => (
+      bucket.templateDefinitionId === null ? [] : [bucket.templateDefinitionId]
+    )),
+  );
+  if (
+    data.templateDefinitions.length !== referencedDefinitionIds.size
+    || data.templateDefinitions.some(
+      (definition) => !referencedDefinitionIds.has(definition.id),
+    )
+  ) {
+    return false;
+  }
+
+  const referencedTemplateIds = new Set(
+    data.templateDefinitions.map((definition) => definition.templateId),
+  );
+  return data.templates.length === referencedTemplateIds.size
+    && data.templates.every((template) => referencedTemplateIds.has(template.id));
+};
+
 export const normalizePlannerExportTimestamp = (
   timestamp: PlannerExportTimestamp,
 ): string => {
@@ -141,17 +198,23 @@ export const buildRawPlannerDataExport = (
   data: PlannerDataV2,
   scope: RawPlannerExportScope,
 ): PlannerDataV2 => {
-  if (scope.kind === 'all') {
-    return validateBuiltPlannerData({
-      version: PLANNER_DATA_V2_VERSION,
-      projects: [...data.projects],
-      buckets: [...data.buckets],
-      tasks: [...data.tasks],
-      templates: [...data.templates],
-      templateDefinitions: [...data.templateDefinitions],
-    });
+  if (!isRecord(scope) || !hasExactKeys(scope, ['kind']) || scope.kind !== 'all') {
+    throw new Error('Raw planner exports are reserved for All data.');
   }
+  return validateBuiltPlannerData({
+    version: PLANNER_DATA_V2_VERSION,
+    projects: [...data.projects],
+    buckets: [...data.buckets],
+    tasks: [...data.tasks],
+    templates: [...data.templates],
+    templateDefinitions: [...data.templateDefinitions],
+  });
+};
 
+const buildScopedPlannerData = (
+  data: PlannerDataV2,
+  scope: ScopedPlannerDataSelection,
+): PlannerDataV2 => {
   const project = findUniqueProject(data, scope.projectId);
   if (scope.kind === 'unassigned') {
     return validateBuiltPlannerData({
@@ -204,6 +267,142 @@ export const buildProjectExchangeEnvelope = (
   return envelope;
 };
 
+export const buildPlannerScopedExchangeEnvelope = (
+  data: PlannerDataV2,
+  scope: PlannerScopedExchangeBuildScope,
+  exportedAt: PlannerExportTimestamp,
+): PlannerScopedExchangeEnvelope => {
+  let scopedData: PlannerDataV2;
+  let envelopeScope: PlannerScopedExchangeScope;
+
+  if (scope.kind === 'project') {
+    scopedData = buildProjectScopedData(data, scope.projectId);
+    const project = scopedData.projects[0];
+    envelopeScope = {
+      kind: 'project',
+      projectId: project.id,
+      projectName: project.name,
+    };
+  } else if (scope.kind === 'bucket') {
+    scopedData = buildScopedPlannerData(data, scope);
+    const project = scopedData.projects[0];
+    const bucket = scopedData.buckets[0];
+    envelopeScope = {
+      kind: 'bucket',
+      projectId: project.id,
+      projectName: project.name,
+      bucketId: bucket.id,
+      bucketName: bucket.name,
+    };
+  } else {
+    scopedData = buildScopedPlannerData(data, scope);
+    const project = scopedData.projects[0];
+    envelopeScope = {
+      kind: 'unassigned',
+      projectId: project.id,
+      projectName: project.name,
+    };
+  }
+
+  const envelope: PlannerScopedExchangeEnvelope = {
+    format: PLANNER_SCOPED_EXCHANGE_FORMAT,
+    envelopeVersion: PLANNER_SCOPED_EXCHANGE_ENVELOPE_VERSION,
+    scope: envelopeScope,
+    exportedAt: normalizePlannerExportTimestamp(exportedAt),
+    data: scopedData,
+  };
+  if (!isValidPlannerScopedExchangeEnvelope(envelope)) {
+    throw new Error('Scoped exchange envelope could not be validated.');
+  }
+  return envelope;
+};
+
+export const isPlannerScopedExchangeEnvelopeCandidate = (value: unknown): boolean => (
+  isRecord(value)
+  && value.format === PLANNER_SCOPED_EXCHANGE_FORMAT
+);
+
+export const isValidPlannerScopedExchangeEnvelope = (
+  value: unknown,
+): value is PlannerScopedExchangeEnvelope => {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    'format',
+    'envelopeVersion',
+    'scope',
+    'exportedAt',
+    'data',
+  ])) {
+    return false;
+  }
+  if (
+    value.format !== PLANNER_SCOPED_EXCHANGE_FORMAT
+    || value.envelopeVersion !== PLANNER_SCOPED_EXCHANGE_ENVELOPE_VERSION
+    || typeof value.exportedAt !== 'string'
+    || !isRecord(value.scope)
+    || !isValidPlannerDataV2(value.data)
+  ) {
+    return false;
+  }
+
+  try {
+    if (normalizePlannerExportTimestamp(value.exportedAt) !== value.exportedAt) return false;
+  } catch {
+    return false;
+  }
+
+  const scope = value.scope;
+  const data = value.data as PlannerDataV2;
+  if (
+    data.projects.length !== 1
+    || typeof scope.kind !== 'string'
+    || typeof scope.projectId !== 'string'
+    || typeof scope.projectName !== 'string'
+  ) {
+    return false;
+  }
+  const project = data.projects[0];
+  if (
+    project.id !== scope.projectId
+    || project.name !== scope.projectName
+    || !hasExactReferencedTemplateClosure(data)
+  ) {
+    return false;
+  }
+
+  if (scope.kind === 'project') {
+    return hasExactKeys(scope, ['kind', 'projectId', 'projectName']);
+  }
+
+  if (scope.kind === 'bucket') {
+    if (
+      !hasExactKeys(scope, [
+        'kind',
+        'projectId',
+        'projectName',
+        'bucketId',
+        'bucketName',
+      ])
+      || typeof scope.bucketId !== 'string'
+      || typeof scope.bucketName !== 'string'
+      || data.buckets.length !== 1
+    ) {
+      return false;
+    }
+    const bucket = data.buckets[0];
+    return bucket.id === scope.bucketId
+      && bucket.name === scope.bucketName
+      && bucket.projectId === project.id
+      && data.tasks.every((task) => task.bucketId === bucket.id);
+  }
+
+  return scope.kind === 'unassigned'
+    && hasExactKeys(scope, ['kind', 'projectId', 'projectName'])
+    && data.buckets.length === 0
+    && data.tasks.every((task) => task.bucketId === null)
+    && data.templateDefinitions.length === 0
+    && data.templates.length === 0;
+};
+
 export const isValidProjectExchangeEnvelope = (
   value: unknown,
 ): value is ProjectExchangeEnvelope => {
@@ -250,25 +449,7 @@ export const isValidProjectExchangeEnvelope = (
     return false;
   }
 
-  const referencedDefinitionIds = new Set(
-    data.buckets.flatMap((bucket) => (
-      bucket.templateDefinitionId === null ? [] : [bucket.templateDefinitionId]
-    )),
-  );
-  if (
-    data.templateDefinitions.length !== referencedDefinitionIds.size
-    || data.templateDefinitions.some(
-      (definition) => !referencedDefinitionIds.has(definition.id),
-    )
-  ) {
-    return false;
-  }
-
-  const referencedTemplateIds = new Set(
-    data.templateDefinitions.map((definition) => definition.templateId),
-  );
-  return data.templates.length === referencedTemplateIds.size
-    && data.templates.every((template) => referencedTemplateIds.has(template.id));
+  return hasExactReferencedTemplateClosure(data);
 };
 
 const WINDOWS_RESERVED_SEGMENT = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;

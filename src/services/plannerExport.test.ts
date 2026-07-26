@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildPlannerExportFilename,
+  buildPlannerScopedExchangeEnvelope,
   buildProjectExchangeEnvelope,
   buildProjectScopedData,
   buildRawPlannerDataExport,
+  isValidPlannerScopedExchangeEnvelope,
   isValidProjectExchangeEnvelope,
   sanitizePlannerExportFilenameSegment,
 } from './plannerExport';
@@ -318,48 +320,245 @@ describe('project-scoped planner export', () => {
   });
 });
 
-describe('legacy raw schema-v2 export scopes', () => {
+describe('raw all-data export compatibility', () => {
   it('keeps all-data exports validator-compatible', () => {
     const exported = buildRawPlannerDataExport(fixture, { kind: 'all' });
     expect(exported).toEqual(fixture);
     expect(isValidPlannerDataV2(exported)).toBe(true);
   });
 
-  it('keeps only one named bucket, all of its tasks including archived, and required dependencies', () => {
-    const exported = buildRawPlannerDataExport(fixture, {
+  it('refuses to generate a raw payload for any scoped selection', () => {
+    expect(() => buildRawPlannerDataExport(
+      fixture,
+      { kind: 'bucket' } as never,
+    )).toThrow('reserved for All data');
+  });
+});
+
+describe('strict scope-tagged planner exchange', () => {
+  it('tags project scope with exact project identity and complete reference closure', () => {
+    const envelope = buildPlannerScopedExchangeEnvelope(
+      fixture,
+      { kind: 'project', projectId: 'project-dev' },
+      '2026-07-25T01:30:00.000Z',
+    );
+
+    expect(envelope).toMatchObject({
+      format: 'bsp-planner-scope',
+      envelopeVersion: 1,
+      scope: {
+        kind: 'project',
+        projectId: 'project-dev',
+        projectName: 'Dev Planner Buckets',
+      },
+      exportedAt: '2026-07-25T01:30:00.000Z',
+    });
+    expect(envelope.data.projects.map((project) => project.id)).toEqual(['project-dev']);
+    expect(envelope.data.buckets.map((bucket) => bucket.id)).toEqual([
+      'bucket-dev-manual',
+      'bucket-dev-linked',
+    ]);
+    expect(envelope.data.tasks).toHaveLength(5);
+    expect(envelope.data.templateDefinitions.map((definition) => definition.id)).toEqual([
+      'definition-needed',
+    ]);
+    expect(envelope.data.templates.map((template) => template.id)).toEqual([
+      'template-needed',
+    ]);
+    expect(isValidPlannerScopedExchangeEnvelope(envelope)).toBe(true);
+  });
+
+  it('tags one named bucket with exact bucket identity, tasks, and dependency closure', () => {
+    const envelope = buildPlannerScopedExchangeEnvelope(
+      fixture,
+      {
+        kind: 'bucket',
+        projectId: 'project-dev',
+        bucketId: 'bucket-dev-linked',
+      },
+      '2026-07-25T01:30:00.000Z',
+    );
+
+    expect(envelope.scope).toEqual({
       kind: 'bucket',
       projectId: 'project-dev',
+      projectName: 'Dev Planner Buckets',
       bucketId: 'bucket-dev-linked',
+      bucketName: 'Ready',
     });
-
-    expect(exported.projects.map((project) => project.id)).toEqual(['project-dev']);
-    expect(exported.buckets.map((bucket) => bucket.id)).toEqual(['bucket-dev-linked']);
-    expect(exported.tasks.map((task) => task.id)).toEqual([
+    expect(envelope.data.buckets.map((bucket) => bucket.id)).toEqual([
+      'bucket-dev-linked',
+    ]);
+    expect(envelope.data.tasks.map((task) => task.id)).toEqual([
       'task-dev-linked',
       'task-dev-linked-archived',
     ]);
-    expect(exported.templateDefinitions.map((definition) => definition.id)).toEqual([
-      'definition-needed',
-    ]);
-    expect(exported.templates.map((template) => template.id)).toEqual(['template-needed']);
-    expect(isValidPlannerDataV2(exported)).toBe(true);
+    expect(envelope.data.tasks.every(
+      (task) => task.bucketId === 'bucket-dev-linked',
+    )).toBe(true);
+    expect(isValidPlannerScopedExchangeEnvelope(envelope)).toBe(true);
   });
 
-  it('keeps only one project and all Unassigned tasks including archived', () => {
-    const exported = buildRawPlannerDataExport(fixture, {
+  it('tags Unassigned scope with only null-bucket tasks and no named-bucket dependencies', () => {
+    const envelope = buildPlannerScopedExchangeEnvelope(
+      fixture,
+      { kind: 'unassigned', projectId: 'project-dev' },
+      '2026-07-25T01:30:00.000Z',
+    );
+
+    expect(envelope.scope).toEqual({
       kind: 'unassigned',
       projectId: 'project-dev',
+      projectName: 'Dev Planner Buckets',
     });
-
-    expect(exported.projects.map((project) => project.id)).toEqual(['project-dev']);
-    expect(exported.buckets).toEqual([]);
-    expect(exported.tasks.map((task) => task.id)).toEqual([
+    expect(envelope.data.buckets).toEqual([]);
+    expect(envelope.data.tasks.map((task) => task.id)).toEqual([
       'task-dev-unassigned',
       'task-dev-unassigned-archived',
     ]);
-    expect(exported.templates).toEqual([]);
-    expect(exported.templateDefinitions).toEqual([]);
-    expect(isValidPlannerDataV2(exported)).toBe(true);
+    expect(envelope.data.tasks.every((task) => task.bucketId === null)).toBe(true);
+    expect(envelope.data.templates).toEqual([]);
+    expect(envelope.data.templateDefinitions).toEqual([]);
+    expect(isValidPlannerScopedExchangeEnvelope(envelope)).toBe(true);
+  });
+
+  it('rejects non-canonical, mismatched, unrelated, and kind-incompatible envelope data', () => {
+    const projectEnvelope = buildPlannerScopedExchangeEnvelope(
+      fixture,
+      { kind: 'project', projectId: 'project-dev' },
+      '2026-07-25T01:30:00.000Z',
+    );
+    const bucketEnvelope = buildPlannerScopedExchangeEnvelope(
+      fixture,
+      {
+        kind: 'bucket',
+        projectId: 'project-dev',
+        bucketId: 'bucket-dev-linked',
+      },
+      '2026-07-25T01:30:00.000Z',
+    );
+    const unassignedEnvelope = buildPlannerScopedExchangeEnvelope(
+      fixture,
+      { kind: 'unassigned', projectId: 'project-dev' },
+      '2026-07-25T01:30:00.000Z',
+    );
+
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      extra: true,
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      format: 'bsp-planner-scope-v2',
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      envelopeVersion: 2,
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      exportedAt: '2026-07-25T01:30:00Z',
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      scope: {
+        kind: 'project',
+        projectId: 'project-dev',
+      },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      scope: {
+        ...projectEnvelope.scope,
+        bucketId: 'unexpected',
+      },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      scope: {
+        kind: 'all',
+        projectId: 'project-dev',
+        projectName: 'Dev Planner Buckets',
+      },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      scope: { ...projectEnvelope.scope, projectId: 'project-other' },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      scope: { ...projectEnvelope.scope, projectName: 'Wrong project' },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      data: {
+        ...projectEnvelope.data,
+        projects: [...projectEnvelope.data.projects, fixture.projects[1]],
+      },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...projectEnvelope,
+      data: {
+        ...projectEnvelope.data,
+        templates: [...projectEnvelope.data.templates, fixture.templates[1]],
+        templateDefinitions: [
+          ...projectEnvelope.data.templateDefinitions,
+          fixture.templateDefinitions[1],
+        ],
+      },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...bucketEnvelope,
+      scope: {
+        ...bucketEnvelope.scope,
+        bucketId: 'bucket-dev-manual',
+      },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...bucketEnvelope,
+      scope: {
+        ...bucketEnvelope.scope,
+        bucketName: 'Wrong bucket',
+      },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...bucketEnvelope,
+      data: {
+        ...bucketEnvelope.data,
+        tasks: [
+          ...bucketEnvelope.data.tasks,
+          fixture.tasks.find((task) => task.id === 'task-dev-unassigned')!,
+        ],
+      },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...bucketEnvelope,
+      data: {
+        ...bucketEnvelope.data,
+        buckets: [...bucketEnvelope.data.buckets, fixture.buckets[0]],
+        tasks: [
+          ...bucketEnvelope.data.tasks,
+          fixture.tasks.find((task) => task.id === 'task-dev-manual-archived')!,
+        ],
+      },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...unassignedEnvelope,
+      data: {
+        ...unassignedEnvelope.data,
+        buckets: [
+          fixture.buckets.find((bucket) => bucket.id === 'bucket-dev-manual')!,
+        ],
+      },
+    })).toBe(false);
+    expect(isValidPlannerScopedExchangeEnvelope({
+      ...unassignedEnvelope,
+      data: {
+        ...unassignedEnvelope.data,
+        templates: [fixture.templates[1]],
+        templateDefinitions: [fixture.templateDefinitions[1]],
+      },
+    })).toBe(false);
   });
 });
 

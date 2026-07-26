@@ -112,7 +112,9 @@ export function DataPanel({
         >
             {!embedded ? <h2>Data</h2> : null}
             <p className="section-helper">
-                Export a backup any time. Project import and restore actions are in Advanced options.
+                Export All data for a full backup. Project, bucket, and Unassigned
+                scopes are exchange files for Project import. Import and Restore
+                actions are in Advanced options.
             </p>
             <div className="data-action-row">
                 <button type="button" className="secondary-button" onClick={onExportData}>

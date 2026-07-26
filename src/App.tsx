@@ -42,8 +42,9 @@ import {
 } from './services/plannerExchange';
 import {
   buildPlannerExportFilename,
-  buildProjectExchangeEnvelope,
+  buildPlannerScopedExchangeEnvelope,
   buildRawPlannerDataExport,
+  isValidPlannerScopedExchangeEnvelope,
   isValidProjectExchangeEnvelope,
   type PlannerExportFilenameScope,
 } from './services/plannerExport';
@@ -119,10 +120,10 @@ const formatProjectImportSummary = (
     `created ${summary.bucketCreatedCount} bucket(s)`,
     `reused ${summary.bucketReusedCount} bucket(s)`,
     `created ${summary.taskCreatedCount} task(s)`,
-    `skipped ${summary.taskSkippedDuplicateCount} duplicate task(s)`,
+    `skipped ${summary.taskSkippedDuplicateCount} exact semantic duplicate task(s)`,
     `created ${summary.dependencyCreatedCount} template record(s)`,
     `reused ${summary.dependencyReusedCount} template record(s)`,
-    `resolved ${ambiguitySummary} ambiguous match(es) by creating new records`,
+    `resolved ${ambiguitySummary} ambiguous/conflicting match(es) by creating new records`,
   ].join('; ') + '.';
 };
 
@@ -1290,18 +1291,26 @@ export default function App() {
     if (!activeProject) return;
     setShowExportScopeMenu(false);
     const exportedAt = new Date();
-    let payload: PlannerData | ReturnType<typeof buildProjectExchangeEnvelope>;
+    let payload: PlannerData | ReturnType<typeof buildPlannerScopedExchangeEnvelope>;
     let filenameScope: PlannerExportFilenameScope;
 
     try {
       if (exportScope === 'project') {
-        payload = buildProjectExchangeEnvelope(state, effectiveActiveProjectId, exportedAt);
+        payload = buildPlannerScopedExchangeEnvelope(
+          state,
+          { kind: 'project', projectId: effectiveActiveProjectId },
+          exportedAt,
+        );
         filenameScope = { kind: 'project', name: activeProject.name };
       } else if (exportScope === 'unassigned') {
-        payload = buildRawPlannerDataExport(state, {
-          kind: 'unassigned',
-          projectId: effectiveActiveProjectId,
-        });
+        payload = buildPlannerScopedExchangeEnvelope(
+          state,
+          {
+            kind: 'unassigned',
+            projectId: effectiveActiveProjectId,
+          },
+          exportedAt,
+        );
         filenameScope = { kind: 'unassigned' };
       } else if (exportScope.startsWith('bucket:')) {
         const bucketId = exportScope.slice('bucket:'.length);
@@ -1309,11 +1318,15 @@ export default function App() {
         if (!bucket) {
           throw new Error('The selected export bucket no longer exists.');
         }
-        payload = buildRawPlannerDataExport(state, {
-          kind: 'bucket',
-          projectId: effectiveActiveProjectId,
-          bucketId,
-        });
+        payload = buildPlannerScopedExchangeEnvelope(
+          state,
+          {
+            kind: 'bucket',
+            projectId: effectiveActiveProjectId,
+            bucketId,
+          },
+          exportedAt,
+        );
         filenameScope = { kind: 'bucket', name: bucket.name };
       } else {
         payload = buildRawPlannerDataExport(state, { kind: 'all' });
@@ -1390,12 +1403,13 @@ export default function App() {
     }
 
     if (
-      isValidProjectExchangeEnvelope(fileResult.value)
+      isValidPlannerScopedExchangeEnvelope(fileResult.value)
+      || isValidProjectExchangeEnvelope(fileResult.value)
       || isProjectExchangeEnvelopeCandidate(fileResult.value)
     ) {
       setPendingRestoreData(null);
       setDataActionMessage(
-        'This is a project export. Use Import project JSON instead; Restore only accepts full planner backups.',
+        'Scoped exchange files cannot be restored. Use Import project JSON instead; Restore accepts All data and legacy raw v1/v2 backups.',
       );
       return;
     }
@@ -1637,8 +1651,10 @@ export default function App() {
   })) ?? [];
   const projectImportDestinationProjects = buildProjectChoiceOptions(state.projects);
   const projectImportSourceKindLabel = pendingProjectImport
-    ? pendingProjectImport.sourceKind === 'project-envelope'
-      ? 'Project export ready to import.'
+    ? pendingProjectImport.sourceKind === 'scoped-envelope'
+      ? 'Scoped exchange export ready to import.'
+      : pendingProjectImport.sourceKind === 'project-envelope'
+        ? 'Legacy project export ready to import.'
       : pendingProjectImport.sourceKind === 'raw-v1'
         ? 'Legacy planner export ready; choose one source project.'
         : 'Planner backup ready; choose one source project.'

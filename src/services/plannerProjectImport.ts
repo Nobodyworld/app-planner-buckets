@@ -7,14 +7,19 @@ import type {
   Project,
 } from '../types/v2';
 import { PLANNER_DATA_V2_VERSION } from '../types/v2';
+import { normalizeResourceTags } from '../types/migration';
 import { isValidPlannerDataV2 } from '../types/validators';
 import {
+  isPlannerScopedExchangeEnvelopeCandidate,
+  isValidPlannerScopedExchangeEnvelope,
   isValidProjectExchangeEnvelope,
+  PLANNER_SCOPED_EXCHANGE_FORMAT,
   PROJECT_EXCHANGE_FORMAT,
 } from './plannerExport';
 import { coercePlannerDataToV2 } from './plannerImport';
 
 export type PlannerProjectImportSourceKind =
+  | 'scoped-envelope'
   | 'project-envelope'
   | 'raw-v1'
   | 'raw-v2';
@@ -97,10 +102,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
 export const isProjectExchangeEnvelopeCandidate = (value: unknown): boolean => (
   isRecord(value)
   && (
-    'format' in value
-    || 'envelopeVersion' in value
-    || 'sourceProject' in value
-    || 'data' in value
+    value.format === PROJECT_EXCHANGE_FORMAT
+    || isPlannerScopedExchangeEnvelopeCandidate(value)
   )
 );
 
@@ -113,6 +116,7 @@ const normalizeName = (value: string, fallback: string): string => (
 );
 
 const normalizeDescription = (value: string): string => value.trim().toLowerCase();
+const canonicalDescription = (value: string): string => value.trim();
 
 const normalizeTimestamp = (value: string): string => {
   if (typeof value !== 'string') {
@@ -192,6 +196,18 @@ const buildSourceChoices = (
 export const parsePlannerProjectImport = (
   value: unknown,
 ): ParsedPlannerProjectImport => {
+  if (isValidPlannerScopedExchangeEnvelope(value)) {
+    const data = value.data;
+    const sourceProjectChoices = buildSourceChoices(data);
+    return {
+      sourceKind: 'scoped-envelope',
+      sourceVersion: 2,
+      data,
+      sourceProjectChoices,
+      autoSelectedSourceProjectId: sourceProjectChoices[0]?.projectId ?? null,
+    };
+  }
+
   if (isValidProjectExchangeEnvelope(value)) {
     const data = value.data;
     const sourceProjectChoices = buildSourceChoices(data);
@@ -206,9 +222,15 @@ export const parsePlannerProjectImport = (
 
   if (
     isProjectExchangeEnvelopeCandidate(value)
-    || (isRecord(value) && value.format === PROJECT_EXCHANGE_FORMAT)
+    || (
+      isRecord(value)
+      && (
+        value.format === PROJECT_EXCHANGE_FORMAT
+        || value.format === PLANNER_SCOPED_EXCHANGE_FORMAT
+      )
+    )
   ) {
-    throw new Error('Selected file is not a valid project exchange envelope.');
+    throw new Error('Selected file is not a valid supported planner exchange envelope.');
   }
 
   const coerced = coercePlannerDataToV2(value);
@@ -320,14 +342,78 @@ const createUniqueImportedProjectName = (
   throw new Error('Project import could not create a unique project name.');
 };
 
-const taskDuplicateKey = (
-  task: Pick<PlannerTaskV2, 'title' | 'description'>,
+type TaskSemanticFingerprintFields = Pick<
+  PlannerTaskV2,
+  | 'title'
+  | 'description'
+  | 'completed'
+  | 'pinned'
+  | 'priority'
+  | 'resourceTags'
+  | 'archivedAt'
+>;
+
+const normalizeArchivedAtForFingerprint = (
+  archivedAt: string | null,
+): string | null => {
+  if (archivedAt === null) return null;
+  const parsed = new Date(archivedAt);
+  return Number.isNaN(parsed.getTime())
+    ? archivedAt.trim()
+    : parsed.toISOString();
+};
+
+const taskSemanticFingerprint = (
+  task: TaskSemanticFingerprintFields,
   bucketId: string | null,
 ): string => JSON.stringify([
   bucketId,
   normalizeName(task.title, 'Untitled task'),
   normalizeDescription(task.description),
+  task.completed,
+  task.pinned,
+  task.priority,
+  normalizeResourceTags([...task.resourceTags]),
+  normalizeArchivedAtForFingerprint(task.archivedAt),
 ]);
+
+const areTemplatesCompatible = (
+  source: BucketTemplate,
+  destination: BucketTemplate,
+): boolean => (
+  normalizeName(source.name, 'Untitled template')
+    === normalizeName(destination.name, 'Untitled template')
+  && canonicalDescription(source.description)
+    === canonicalDescription(destination.description)
+  && source.active === destination.active
+);
+
+const areTemplateDefinitionsCompatible = (
+  source: BucketTemplateDefinition,
+  destination: BucketTemplateDefinition,
+): boolean => (
+  normalizeName(source.name, 'Untitled definition')
+    === normalizeName(destination.name, 'Untitled definition')
+  && canonicalDescription(source.description)
+    === canonicalDescription(destination.description)
+  && source.priority === destination.priority
+  && source.defaultActive === destination.defaultActive
+  && source.position === destination.position
+);
+
+const areBucketsCompatibleForNameReuse = (
+  source: BucketV2,
+  destination: BucketV2,
+  mappedDefinitionId: string | null,
+): boolean => (
+  normalizeName(source.name, 'Untitled bucket')
+    === normalizeName(destination.name, 'Untitled bucket')
+  && destination.templateDefinitionId === mappedDefinitionId
+  && canonicalDescription(source.description)
+    === canonicalDescription(destination.description)
+  && source.priority === destination.priority
+  && source.pinned === destination.pinned
+);
 
 const normalizePinnedOrder = <Item extends { pinned: boolean }>(
   items: readonly Item[],
@@ -379,7 +465,11 @@ const recordAmbiguity = (
 ): void => {
   ambiguities.push({
     ...ambiguity,
-    candidateIds: [...ambiguity.candidateIds],
+    candidateIds: [...ambiguity.candidateIds].sort((left, right) => {
+      if (left < right) return -1;
+      if (left > right) return 1;
+      return 0;
+    }),
     resolution: 'created-new',
   });
 };
@@ -440,29 +530,52 @@ export const importPlannerProject = (
     mergedProjects.push(destinationProject);
   }
 
+  const destinationTemplates = [...current.templates];
+  const destinationTemplateDefinitions = [...current.templateDefinitions];
+  const destinationBuckets = current.buckets.filter(
+    (bucket) => bucket.projectId === destinationProject.id,
+  );
+  const destinationTasks = current.tasks.filter(
+    (task) => task.projectId === destinationProject.id,
+  );
+  const consumedTemplateIds = new Set<string>();
+  const consumedDefinitionIds = new Set<string>();
+  const consumedBucketIds = new Set<string>();
+
   const mergedTemplates = [...current.templates];
   const templateIdMap = new Map<string, string>();
 
   for (const sourceTemplate of sourceData.templates) {
     const name = canonicalName(sourceTemplate.name, 'Untitled template');
     const normalizedName = normalizeName(name, 'Untitled template');
-    const matches = mergedTemplates.filter(
+    const nameMatches = destinationTemplates.filter(
       (template) => normalizeName(template.name, 'Untitled template') === normalizedName,
     );
+    const compatibleMatches = nameMatches.filter((template) => (
+      areTemplatesCompatible(sourceTemplate, template)
+    ));
+    const reusableMatches = compatibleMatches.filter(
+      (template) => !consumedTemplateIds.has(template.id),
+    );
 
-    if (matches.length === 1) {
-      templateIdMap.set(sourceTemplate.id, matches[0].id);
+    if (compatibleMatches.length === 1 && reusableMatches.length === 1) {
+      const reusableTemplate = reusableMatches[0];
+      templateIdMap.set(sourceTemplate.id, reusableTemplate.id);
+      consumedTemplateIds.add(reusableTemplate.id);
       summary.templateReusedCount += 1;
       continue;
     }
 
-    if (matches.length > 1) {
+    if (nameMatches.length > 0) {
+      const reportMatches = compatibleMatches.length > 0
+        ? compatibleMatches
+        : nameMatches;
       recordAmbiguity(ambiguities, {
         entity: 'template',
         sourceId: sourceTemplate.id,
         matchBy: 'normalized-name',
         normalizedName,
-        candidateIds: matches.map((template) => template.id),
+        candidateIds: reportMatches.map((template) => template.id),
       });
       summary.templateAmbiguousMatchCount += 1;
     }
@@ -490,24 +603,35 @@ export const importPlannerProject = (
 
     const name = canonicalName(sourceDefinition.name, 'Untitled definition');
     const normalizedName = normalizeName(name, 'Untitled definition');
-    const matches = mergedTemplateDefinitions.filter((definition) => (
+    const nameMatches = destinationTemplateDefinitions.filter((definition) => (
       definition.templateId === mappedTemplateId
       && normalizeName(definition.name, 'Untitled definition') === normalizedName
     ));
+    const compatibleMatches = nameMatches.filter((definition) => (
+      areTemplateDefinitionsCompatible(sourceDefinition, definition)
+    ));
+    const reusableMatches = compatibleMatches.filter(
+      (definition) => !consumedDefinitionIds.has(definition.id),
+    );
 
-    if (matches.length === 1) {
-      templateDefinitionIdMap.set(sourceDefinition.id, matches[0].id);
+    if (compatibleMatches.length === 1 && reusableMatches.length === 1) {
+      const reusableDefinition = reusableMatches[0];
+      templateDefinitionIdMap.set(sourceDefinition.id, reusableDefinition.id);
+      consumedDefinitionIds.add(reusableDefinition.id);
       summary.templateDefinitionReusedCount += 1;
       continue;
     }
 
-    if (matches.length > 1) {
+    if (nameMatches.length > 0) {
+      const reportMatches = compatibleMatches.length > 0
+        ? compatibleMatches
+        : nameMatches;
       recordAmbiguity(ambiguities, {
         entity: 'template-definition',
         sourceId: sourceDefinition.id,
         matchBy: 'normalized-name',
         normalizedName,
-        candidateIds: matches.map((definition) => definition.id),
+        candidateIds: reportMatches.map((definition) => definition.id),
       });
       summary.templateDefinitionAmbiguousMatchCount += 1;
     }
@@ -539,16 +663,23 @@ export const importPlannerProject = (
     }
 
     if (mappedDefinitionId) {
-      const definitionMatches = mergedBuckets.filter((bucket) => (
-        bucket.projectId === destinationProject.id
-        && bucket.templateDefinitionId === mappedDefinitionId
+      const definitionMatches = destinationBuckets.filter((bucket) => (
+        bucket.templateDefinitionId === mappedDefinitionId
       ));
-      if (definitionMatches.length === 1) {
-        bucketIdMap.set(sourceBucket.id, definitionMatches[0].id);
+      const reusableDefinitionMatches = definitionMatches.filter(
+        (bucket) => !consumedBucketIds.has(bucket.id),
+      );
+      if (
+        definitionMatches.length === 1
+        && reusableDefinitionMatches.length === 1
+      ) {
+        const reusableBucket = reusableDefinitionMatches[0];
+        bucketIdMap.set(sourceBucket.id, reusableBucket.id);
+        consumedBucketIds.add(reusableBucket.id);
         summary.bucketReusedCount += 1;
         continue;
       }
-      if (definitionMatches.length > 1) {
+      if (definitionMatches.length > 0) {
         recordAmbiguity(ambiguities, {
           entity: 'bucket',
           sourceId: sourceBucket.id,
@@ -557,44 +688,56 @@ export const importPlannerProject = (
           candidateIds: definitionMatches.map((bucket) => bucket.id),
         });
         summary.bucketAmbiguousMatchCount += 1;
-        throw new Error(
-          `Destination project has ambiguous buckets for template definition "${mappedDefinitionId}".`,
-        );
+        if (definitionMatches.length > 1) {
+          throw new Error(
+            `Destination project has ambiguous buckets for template definition "${mappedDefinitionId}".`,
+          );
+        }
       }
     }
 
     const name = canonicalName(sourceBucket.name, 'Untitled bucket');
     const normalizedName = normalizeName(name, 'Untitled bucket');
-    const nameMatches = mergedBuckets.filter((bucket) => (
-      bucket.projectId === destinationProject.id
-      && normalizeName(bucket.name, 'Untitled bucket') === normalizedName
+    const nameMatches = destinationBuckets.filter((bucket) => (
+      normalizeName(bucket.name, 'Untitled bucket') === normalizedName
     ));
+    const compatibleNameMatches = nameMatches.filter((bucket) => (
+      areBucketsCompatibleForNameReuse(
+        sourceBucket,
+        bucket,
+        mappedDefinitionId ?? null,
+      )
+    ));
+    const reusableNameMatches = compatibleNameMatches.filter(
+      (bucket) => !consumedBucketIds.has(bucket.id),
+    );
 
-    if (nameMatches.length === 1) {
-      const nameMatch = nameMatches[0];
-      if (nameMatch.templateDefinitionId === (mappedDefinitionId ?? null)) {
-        bucketIdMap.set(sourceBucket.id, nameMatch.id);
-        summary.bucketReusedCount += 1;
-        continue;
-      }
-
-      recordAmbiguity(ambiguities, {
-        entity: 'bucket',
-        sourceId: sourceBucket.id,
-        matchBy: 'template-definition-conflict',
-        normalizedName,
-        candidateIds: [nameMatch.id],
-      });
-      summary.bucketAmbiguousMatchCount += 1;
+    if (compatibleNameMatches.length === 1 && reusableNameMatches.length === 1) {
+      const reusableBucket = reusableNameMatches[0];
+      bucketIdMap.set(sourceBucket.id, reusableBucket.id);
+      consumedBucketIds.add(reusableBucket.id);
+      summary.bucketReusedCount += 1;
+      continue;
     }
 
-    if (nameMatches.length > 1) {
+    if (nameMatches.length > 0) {
+      const reportMatches = compatibleNameMatches.length > 0
+        ? compatibleNameMatches
+        : nameMatches;
+      const hasTemplateDefinitionConflict = (
+        compatibleNameMatches.length === 0
+        && reportMatches.some((bucket) => (
+          bucket.templateDefinitionId !== (mappedDefinitionId ?? null)
+        ))
+      );
       recordAmbiguity(ambiguities, {
         entity: 'bucket',
         sourceId: sourceBucket.id,
-        matchBy: 'normalized-name',
+        matchBy: hasTemplateDefinitionConflict
+          ? 'template-definition-conflict'
+          : 'normalized-name',
         normalizedName,
-        candidateIds: nameMatches.map((bucket) => bucket.id),
+        candidateIds: reportMatches.map((bucket) => bucket.id),
       });
       summary.bucketAmbiguousMatchCount += 1;
     }
@@ -614,11 +757,12 @@ export const importPlannerProject = (
   }
 
   const mergedTasks = [...current.tasks];
-  const existingTaskKeys = new Set(
-    mergedTasks
-      .filter((task) => task.projectId === destinationProject.id)
-      .map((task) => taskDuplicateKey(task, task.bucketId)),
+  const destinationTaskFingerprints = new Set(
+    destinationTasks.map((task) => (
+      taskSemanticFingerprint(task, task.bucketId)
+    )),
   );
+  const sourceTaskFingerprints = new Set<string>();
   const uploadedTaskIds: string[] = [];
 
   for (const sourceTask of sourceData.tasks) {
@@ -631,8 +775,18 @@ export const importPlannerProject = (
 
     const title = canonicalName(sourceTask.title, 'Untitled task');
     const description = sourceTask.description.trim();
-    const duplicateKey = taskDuplicateKey({ title, description }, mappedBucketId ?? null);
-    if (existingTaskKeys.has(duplicateKey)) {
+    const duplicateFingerprint = taskSemanticFingerprint(
+      {
+        ...sourceTask,
+        title,
+        description,
+      },
+      mappedBucketId ?? null,
+    );
+    if (
+      destinationTaskFingerprints.has(duplicateFingerprint)
+      || sourceTaskFingerprints.has(duplicateFingerprint)
+    ) {
       summary.taskSkippedDuplicateCount += 1;
       continue;
     }
@@ -650,7 +804,7 @@ export const importPlannerProject = (
     };
     mergedTasks.push(createdTask);
     uploadedTaskIds.push(createdTask.id);
-    existingTaskKeys.add(duplicateKey);
+    sourceTaskFingerprints.add(duplicateFingerprint);
     summary.taskCreatedCount += 1;
   }
 
