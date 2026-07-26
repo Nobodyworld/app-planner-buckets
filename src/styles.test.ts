@@ -103,17 +103,24 @@ describe('bucket header containment contract', () => {
         expect(heading).not.toMatch(/\n\s*(?:min-)?width\s*:/);
     });
 
-    it('bounds all actions in a four-column grid without escaping the header', () => {
+    it('bounds actions in two fixed-target rows without escaping the header', () => {
         const actions = cssRule('.bucket-actions');
+        const row = cssRule('.bucket-action-row');
 
         expect(actions).toMatch(/flex:\s*0 0 auto;/);
-        expect(actions).toMatch(/display:\s*grid;/);
-        expect(actions).toMatch(/grid-template-columns:\s*repeat\(4,\s*28px\);/);
+        expect(actions).toMatch(/display:\s*flex;/);
+        expect(actions).toMatch(/flex-direction:\s*column;/);
+        expect(actions).toMatch(/align-items:\s*flex-end;/);
         expect(actions).toMatch(/gap:\s*4px;/);
-        expect(actions).toMatch(/align-content:\s*start;/);
+        expect(row).toMatch(/display:\s*grid;/);
+        expect(row).toMatch(/grid-auto-flow:\s*column;/);
+        expect(row).toMatch(/grid-auto-columns:\s*28px;/);
+        expect(row).toMatch(/min-height:\s*28px;/);
+        expect(row).toMatch(/gap:\s*4px;/);
         expect(actions).not.toMatch(/position:\s*absolute;/);
+        expect(row).not.toMatch(/position:\s*absolute;/);
         expect(actions).not.toMatch(/display:\s*none;/);
-        expect(actions).not.toMatch(/white-space:\s*nowrap;/);
+        expect(row).not.toMatch(/display:\s*none;/);
     });
 
     it('preserves the existing narrow bucket-width contract', () => {

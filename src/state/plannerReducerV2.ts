@@ -21,6 +21,7 @@ export type PlannerActionV2 =
   | { type: 'UPDATE_TASK'; projectId: string; taskId: string; draft: TaskDraft; updatedAt: string }
   | { type: 'TOGGLE_TASK_PIN'; projectId: string; taskId: string; updatedAt: string }
   | { type: 'DELETE_TASK'; projectId: string; taskId: string }
+  | { type: 'DELETE_TASKS_EXACT'; projectId: string; taskIds: string[] }
   | { type: 'TOGGLE_TASK'; projectId: string; taskId: string; updatedAt: string }
   | { type: 'MOVE_TASK'; projectId: string; taskId: string; bucketId: string | null; targetIndex?: number; updatedAt: string }
   | { type: 'MOVE_TASKS'; projectId: string; taskIds: string[]; bucketId: string | null; targetIndex?: number; updatedAt: string }
@@ -662,6 +663,22 @@ export const plannerReducerV2 = (
       return {
         ...state,
         tasks: state.tasks.filter((task) => !(task.id === action.taskId && task.projectId === action.projectId)),
+      };
+    }
+
+    case 'DELETE_TASKS_EXACT': {
+      const taskIds = new Set(action.taskIds);
+      if (taskIds.size === 0) return state;
+      const hasMatchingTask = state.tasks.some((task) => (
+        task.projectId === action.projectId && taskIds.has(task.id)
+      ));
+      if (!hasMatchingTask) return state;
+
+      return {
+        ...state,
+        tasks: state.tasks.filter((task) => !(
+          task.projectId === action.projectId && taskIds.has(task.id)
+        )),
       };
     }
 

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent as ReactDragEvent, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
 import { BucketColumn } from './components/BucketColumn';
 import { ProjectBoard } from './components/ProjectBoard';
+import { PasteUndoNotice } from './components/PasteUndoNotice';
 import { SelectionActions } from './components/SelectionControls';
 import { TaskEditor } from './components/TaskEditor';
 import { PlannerSidepanel } from './components/sidepanel/PlannerSidepanel';
@@ -87,9 +88,16 @@ const ensureScrollableTargetInView = (
 
 const UPLOAD_HALO_DURATION_MS = 120000;
 const EXPORT_NOTICE_DURATION_MS = 10000;
+const PASTE_UNDO_DURATION_MS = 10000;
 const DROP_SETTLE_DURATION_MS = 1500;
 const BOARD_EDGE_AUTOSCROLL_ZONE_PX = 96;
 const BOARD_EDGE_AUTOSCROLL_MAX_SPEED_PX = 24;
+
+interface PasteUndoState {
+  projectId: string;
+  taskIds: string[];
+  destinationName: string;
+}
 
 const formatProjectImportSummary = (
   summary: PlannerProjectImportSummary,
@@ -373,6 +381,7 @@ export default function App() {
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(() => new Set());
   const [taskClipboard, setTaskClipboard] = useState<StructuredBucketCopyTask[]>([]);
   const [activePasteBucketId, setActivePasteBucketId] = useState<string | null>(null);
+  const [latestPasteUndo, setLatestPasteUndo] = useState<PasteUndoState | null>(null);
   const [draggedBucketId, setDraggedBucketId] = useState<string | null>(null);
   const [activeBucketDropIndex, setActiveBucketDropIndex] = useState<number | null>(null);
   const [settledBucketDropIndex, setSettledBucketDropIndex] = useState<number | null>(null);
@@ -398,8 +407,10 @@ export default function App() {
   const projectImportConfirmRef = useRef<HTMLDivElement>(null);
   const exportScopeMenuRef = useRef<HTMLDivElement>(null);
   const restoreUndoCloseTimeoutRef = useRef<number | null>(null);
+  const pasteUndoTimeoutRef = useRef<number | null>(null);
   const restoreFileReadSequenceRef = useRef(0);
   const projectImportFileReadSequenceRef = useRef(0);
+  const previousActiveProjectIdRef = useRef(initialProjectId);
   const bucketHighlightTimeoutRef = useRef<number | null>(null);
   const taskSurgeTimeoutRef = useRef<number | null>(null);
   const uploadHaloTimeoutRef = useRef<number | null>(null);
@@ -410,6 +421,13 @@ export default function App() {
   const sidepanelHoveringRef = useRef(false);
   const sidepanelToggleHoveringRef = useRef(false);
   const sidepanelLockHoveringRef = useRef(false);
+  const clearLatestPasteUndo = () => {
+    if (pasteUndoTimeoutRef.current !== null) {
+      window.clearTimeout(pasteUndoTimeoutRef.current);
+      pasteUndoTimeoutRef.current = null;
+    }
+    setLatestPasteUndo(null);
+  };
   const sidepanelToggleLabel = isSidepanelOpen ? 'Hide controls' : 'Show controls';
   const sidepanelToggleIcon = isSidepanelOpen ? '▴' : '▾';
   const sidepanelLockIcon = isSidepanelLocked ? '🔒' : '🔓';
@@ -497,6 +515,23 @@ export default function App() {
   }, [activeProjectId, state.projects]);
 
   useEffect(() => {
+    if (previousActiveProjectIdRef.current === effectiveActiveProjectId) return;
+    previousActiveProjectIdRef.current = effectiveActiveProjectId;
+    clearLatestPasteUndo();
+  }, [effectiveActiveProjectId]);
+
+  useEffect(() => {
+    if (!latestPasteUndo) return;
+    const hasRemainingPastedTask = state.tasks.some((task) => (
+      task.projectId === latestPasteUndo.projectId
+      && latestPasteUndo.taskIds.includes(task.id)
+    ));
+    if (!hasRemainingPastedTask) {
+      clearLatestPasteUndo();
+    }
+  }, [latestPasteUndo, state.tasks]);
+
+  useEffect(() => {
     if (!quickTaskProjectId) return;
     const selectedProject = state.projects.find((project) => project.id === quickTaskProjectId);
     if (!selectedProject) {
@@ -578,6 +613,9 @@ export default function App() {
       }
       if (restoreUndoCloseTimeoutRef.current !== null) {
         window.clearTimeout(restoreUndoCloseTimeoutRef.current);
+      }
+      if (pasteUndoTimeoutRef.current !== null) {
+        window.clearTimeout(pasteUndoTimeoutRef.current);
       }
       if (bucketHighlightTimeoutRef.current !== null) {
         window.clearTimeout(bucketHighlightTimeoutRef.current);
@@ -1386,6 +1424,7 @@ export default function App() {
 
   const clearWorkspaceTransientState = (clearClipboard: boolean) => {
     setSelectedTaskIds(new Set());
+    clearLatestPasteUndo();
     setActivePasteBucketId(null);
     if (clearClipboard) {
       setTaskClipboard([]);
@@ -1757,19 +1796,58 @@ export default function App() {
       return;
     }
 
+    const destinationBucketId = (
+      bucketId !== null
+      && activeBuckets.some((bucket) => bucket.id === bucketId)
+    )
+      ? bucketId
+      : null;
+    const pastedTasks = taskClipboard.map((task) => createTask(effectiveActiveProjectId, {
+      title: task.title,
+      description: task.description,
+      bucketId: destinationBucketId,
+    }));
+    const bucketName = destinationBucketId
+      ? bucketNameById.get(destinationBucketId) ?? 'Unassigned'
+      : 'Unassigned';
+
+    clearLatestPasteUndo();
     dispatchPlanner({
       type: 'ADD_TASK_BATCH',
-      tasks: taskClipboard.map((task) => createTask(effectiveActiveProjectId, {
-        title: task.title,
-        description: task.description,
-        bucketId,
-      })),
+      tasks: pastedTasks,
     });
+    setLatestPasteUndo({
+      projectId: effectiveActiveProjectId,
+      taskIds: pastedTasks.map((task) => task.id),
+      destinationName: bucketName,
+    });
+    pasteUndoTimeoutRef.current = window.setTimeout(() => {
+      setLatestPasteUndo(null);
+      pasteUndoTimeoutRef.current = null;
+    }, PASTE_UNDO_DURATION_MS);
 
     setPendingTaskSurge(true);
-    setActivePasteBucketId(bucketId);
-    const bucketName = bucketId ? bucketNameById.get(bucketId) ?? 'Unassigned' : 'Unassigned';
+    setActivePasteBucketId(destinationBucketId);
     showTemporaryStatus(`Pasted ${taskClipboard.length} task${taskClipboard.length === 1 ? '' : 's'} into ${bucketName}`);
+  };
+
+  const keepLatestPaste = () => {
+    if (!latestPasteUndo) return;
+    const taskCount = latestPasteUndo.taskIds.length;
+    clearLatestPasteUndo();
+    showTemporaryStatus(`Kept ${taskCount} pasted task${taskCount === 1 ? '' : 's'}`);
+  };
+
+  const undoLatestPaste = () => {
+    if (!latestPasteUndo) return;
+    const taskCount = latestPasteUndo.taskIds.length;
+    dispatchPlanner({
+      type: 'DELETE_TASKS_EXACT',
+      projectId: latestPasteUndo.projectId,
+      taskIds: latestPasteUndo.taskIds,
+    });
+    clearLatestPasteUndo();
+    showTemporaryStatus(`Undid ${taskCount} pasted task${taskCount === 1 ? '' : 's'}`);
   };
 
   const handleTaskDragStart = (taskId: string, taskIds: string[]) => {
@@ -2114,6 +2192,15 @@ export default function App() {
             ×
           </button>
         </div>
+      )}
+
+      {latestPasteUndo && (
+        <PasteUndoNotice
+          taskCount={latestPasteUndo.taskIds.length}
+          destinationName={latestPasteUndo.destinationName}
+          onKeep={keepLatestPaste}
+          onUndo={undoLatestPaste}
+        />
       )}
 
       <header className="app-header">

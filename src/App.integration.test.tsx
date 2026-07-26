@@ -1024,6 +1024,184 @@ describe('App integration', () => {
         expect(pastedTask?.bucketId).toBeNull();
     });
 
+    it('offers an accessible latest-paste confirmation and Keep finalizes the tasks', async () => {
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
+
+        const notice = screen.getByRole('region', { name: 'Paste confirmation' });
+        expect(within(notice).getByRole('status')).toHaveTextContent(
+            'Pasted 1 task into Unassigned. Keep it?',
+        );
+        const keep = within(notice).getByRole('button', { name: 'Keep pasted tasks' });
+        keep.focus();
+        expect(keep).toHaveFocus();
+        fireEvent.click(keep);
+
+        expect(screen.queryByRole('region', {
+            name: 'Paste confirmation',
+        })).not.toBeInTheDocument();
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(2);
+        });
+    });
+
+    it('auto-dismisses the paste confirmation after ten seconds without removing tasks', () => {
+        vi.useFakeTimers();
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
+        expect(screen.getByRole('region', {
+            name: 'Paste confirmation',
+        })).toBeInTheDocument();
+
+        act(() => {
+            vi.advanceTimersByTime(10000);
+        });
+
+        expect(screen.queryByRole('region', {
+            name: 'Paste confirmation',
+        })).not.toBeInTheDocument();
+        expect(readRuntimePlannerData().tasks).toHaveLength(2);
+    });
+
+    it('Undo removes only the most recent repeated paste and preserves earlier pasted tasks', async () => {
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        const paste = screen.getByRole('button', { name: 'Paste tasks into Unassigned' });
+        fireEvent.click(paste);
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(2);
+        });
+        const firstPastedTaskId = readRuntimePlannerData().tasks.find(
+            (task) => task.id !== 'task-1',
+        )?.id;
+
+        fireEvent.click(paste);
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(3);
+        });
+        expect(screen.getAllByRole('region', {
+            name: 'Paste confirmation',
+        })).toHaveLength(1);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Undo pasted tasks' }));
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            expect(saved.tasks).toHaveLength(2);
+            expect(saved.tasks.some((task) => task.id === firstPastedTaskId)).toBe(true);
+            expect(saved.tasks.filter((task) => (
+                task.bucketId === null && task.title === 'Write launch summary'
+            ))).toHaveLength(1);
+        });
+        expect(screen.queryByRole('region', {
+            name: 'Paste confirmation',
+        })).not.toBeInTheDocument();
+    });
+
+    it('Undo remains exact and safe after the pasted destination bucket is deleted', async () => {
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into To Do' }));
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(2);
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Delete bucket' }));
+        const deleteDialog = screen.getByRole('dialog', { name: 'Delete bucket' });
+        fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete bucket' }));
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            expect(saved.buckets).toHaveLength(0);
+            expect(saved.tasks.every((task) => task.bucketId === null)).toBe(true);
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Undo pasted tasks' }));
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            expect(saved.tasks).toHaveLength(1);
+            expect(saved.tasks[0].id).toBe('task-1');
+            expect(saved.tasks[0].bucketId).toBeNull();
+        });
+    });
+
+    it('falls back to Unassigned when a keyboard paste target was deleted', async () => {
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Delete bucket' }));
+        const deleteDialog = screen.getByRole('dialog', { name: 'Delete bucket' });
+        fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete bucket' }));
+        await waitFor(() => {
+            expect(readRuntimePlannerData().buckets).toHaveLength(0);
+        });
+
+        fireEvent.keyDown(window, { key: 'v', ctrlKey: true });
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            expect(saved.tasks).toHaveLength(2);
+            expect(saved.tasks.every((task) => task.bucketId === null)).toBe(true);
+        });
+        expect(within(screen.getByRole('region', {
+            name: 'Paste confirmation',
+        })).getByRole('status')).toHaveTextContent(
+            'Pasted 1 task into Unassigned. Keep it?',
+        );
+    });
+
+    it('clears stale paste confirmation on project switching and destructive Restore', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy Beta Bucket as JSON' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
+        expect(screen.getByRole('region', {
+            name: 'Paste confirmation',
+        })).toBeInTheDocument();
+
+        expandSidebarSection('Projects');
+        fireEvent.change(screen.getByLabelText('Active project'), {
+            target: { value: 'project-a' },
+        });
+        expect(screen.queryByRole('region', {
+            name: 'Paste confirmation',
+        })).not.toBeInTheDocument();
+        expect(readRuntimePlannerData().tasks.filter((task) => (
+            task.projectId === 'project-b' && task.bucketId === null
+        ))).toHaveLength(3);
+
+        fireEvent.change(screen.getByLabelText('Active project'), {
+            target: { value: 'project-b' },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
+        expect(screen.getByRole('region', {
+            name: 'Paste confirmation',
+        })).toBeInTheDocument();
+
+        expandSidebarSection('Data');
+        fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerFixture)], 'replacement.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        fireEvent.click(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        }));
+
+        expect(screen.queryByRole('region', {
+            name: 'Paste confirmation',
+        })).not.toBeInTheDocument();
+    });
+
     it('manages explicit task, named-bucket, and Unassigned selection independently from completion', async () => {
         localStorage.clear();
         seedPlannerDataV2(selectionFixture);
@@ -1674,7 +1852,7 @@ describe('App integration', () => {
         const frame = container.querySelector('.board-frame') as HTMLElement;
         mockBoardFrameGeometry(frame);
 
-        const bucketDragHandle = screen.getAllByRole('img', { name: 'Drag to move bucket' })[0];
+        const bucketDragHandle = screen.getAllByRole('button', { name: 'Drag to move bucket' })[0];
         const dataTransfer = createDragDataTransfer();
 
         fireEvent.dragStart(bucketDragHandle, { dataTransfer });
@@ -1702,7 +1880,7 @@ describe('App integration', () => {
         seedPlannerDataV2(overflowingBoardFixture);
         const { container } = render(<App />);
 
-        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+        const bucketHandles = screen.getAllByRole('button', { name: 'Drag to move bucket' });
         const laterBucketHandle = bucketHandles[8];
         const sourceColumn = laterBucketHandle.closest('.bucket-column') as HTMLElement;
         const beforeOrder = Array.from(container.querySelectorAll('.bucket-column h2')).map((heading) => heading.textContent);
@@ -1757,7 +1935,7 @@ describe('App integration', () => {
             localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, String(zoomPercent));
             const { container } = render(<App />);
             expect(container.querySelector('.board-stage')).toHaveClass(`board-zoom-${zoomPercent}`);
-            const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+            const bucketHandles = screen.getAllByRole('button', { name: 'Drag to move bucket' });
             const sourceHandle = bucketHandles[0];
             const targetColumn = bucketHandles[8].closest('.bucket-column') as HTMLElement;
             const dataTransfer = createDragDataTransfer();
@@ -1797,7 +1975,7 @@ describe('App integration', () => {
         localStorage.clear();
         seedPlannerDataV2(overflowingBoardFixture);
         const { container } = render(<App />);
-        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+        const bucketHandles = screen.getAllByRole('button', { name: 'Drag to move bucket' });
         const sourceHandle = bucketHandles[8];
         const targetColumn = bucketHandles[1].closest('.bucket-column') as HTMLElement;
         const dataTransfer = createDragDataTransfer();
@@ -1832,7 +2010,7 @@ describe('App integration', () => {
         localStorage.clear();
         seedPlannerDataV2(overflowingBoardFixture);
         const { container } = render(<App />);
-        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+        const bucketHandles = screen.getAllByRole('button', { name: 'Drag to move bucket' });
         const sourceHandle = bucketHandles[sourceIndex];
         const targetColumn = bucketHandles[4].closest('.bucket-column') as HTMLElement;
         const dataTransfer = createDragDataTransfer();
@@ -1863,7 +2041,7 @@ describe('App integration', () => {
         localStorage.clear();
         seedPlannerDataV2(overflowingBoardFixture);
         const { container } = render(<App />);
-        const sourceHandle = screen.getAllByRole('img', { name: 'Drag to move bucket' })[4];
+        const sourceHandle = screen.getAllByRole('button', { name: 'Drag to move bucket' })[4];
         const beforeOrder = readRenderedBucketOrder(container);
         const beforePersistedOrder = readRuntimePlannerData().buckets.map((bucket) => bucket.id);
         const dataTransfer = createDragDataTransfer();

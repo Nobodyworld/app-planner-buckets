@@ -598,6 +598,58 @@ describe('plannerReducerV2', () => {
     expect(result.current.canUndo).toBe(false);
   });
 
+  it('deletes only matching project task IDs for a paste-specific inverse', () => {
+    const state: PlannerDataV2 = {
+      ...baseState(),
+      projects: [
+        ...baseState().projects,
+        project('project-b', 'Other project'),
+      ],
+      tasks: [
+        task('existing-task', 'project-a', 'bucket-a'),
+        task('pasted-a', 'project-a', 'bucket-a'),
+        task('pasted-b', 'project-a', null),
+        task('pasted-a-other-project', 'project-b', null),
+      ],
+    };
+
+    const next = plannerReducerV2(state, {
+      type: 'DELETE_TASKS_EXACT',
+      projectId: 'project-a',
+      taskIds: ['pasted-a', 'pasted-b', 'already-missing', 'pasted-a'],
+    });
+
+    expect(next.tasks.map((item) => item.id)).toEqual([
+      'existing-task',
+      'pasted-a-other-project',
+    ]);
+    expect(next.projects).toBe(state.projects);
+    expect(next.buckets).toBe(state.buckets);
+  });
+
+  it('treats an empty or already-consumed paste inverse as a history no-op', () => {
+    const initialState = baseState();
+    const { result } = renderHook(() => (
+      usePlannerHistory<PlannerDataV2, PlannerActionV2>(initialState, plannerReducerV2)
+    ));
+
+    act(() => {
+      result.current.dispatch({
+        type: 'DELETE_TASKS_EXACT',
+        projectId: 'project-a',
+        taskIds: [],
+      });
+      result.current.dispatch({
+        type: 'DELETE_TASKS_EXACT',
+        projectId: 'project-a',
+        taskIds: ['missing-task'],
+      });
+    });
+
+    expect(result.current.state).toBe(initialState);
+    expect(result.current.canUndo).toBe(false);
+  });
+
   it('supports template CRUD and ordering with semantic no-ops', () => {
     const created = plannerReducerV2(baseState(), {
       type: 'ADD_TEMPLATE',
