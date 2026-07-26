@@ -1,10 +1,41 @@
 # Project-native workspace slice execution plan
 
-Status: in progress
+Status: implementation and automated validation complete; owner physical
+acceptance pending
 Primary issue: #61
 Included issues: #59, #56, #47, #50, #51, #52, #53, #46
 Branch: `slice/project-native-workspace`
 Starting commit: `d83c2f9fbbb745815fab1d4e6ced8d07e51913ea`
+
+## Completion evidence
+
+Implementation was delivered as independently reviewable commits:
+
+- `59a84e2` — two-axis board navigation and nine-step percentage zoom
+- `7d252eb` — project/bucket-aware Quick Add and sidebar disclosures
+- `2ee2170` — explicit task and bucket selection
+- `1805eff` — deterministic project/bucket copy and scoped export
+- `e0731d8` — explicit project import plus recoverable full Restore
+- `da229b5` — exact latest-paste Undo and bucket-action polish
+
+Final pre-packaging validation on 2026-07-25:
+
+- `npm ci`: 160 packages installed; 161 packages audited
+- `npm run verify`: 27 test files and 481 tests passed; TypeScript and the Vite
+  production build passed
+- `npm audit`: one high-severity transitive advisory for
+  `vite/node_modules/postcss` (`postcss <=8.5.17`,
+  `GHSA-r28c-9q8g-f849`); no dependency update was mixed into this feature slice
+- `cargo fmt --manifest-path src-tauri/Cargo.toml --check`: passed
+- `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features
+  -- -D warnings`: passed
+- `cargo test --manifest-path src-tauri/Cargo.toml`: passed; the desktop crate
+  currently contains zero Rust unit or documentation tests
+
+The exact committed desktop installer is built and hashed only after the final
+documentation commit is synchronized with the remote branch. Browser/WebView,
+clipboard, drag, focus, installation, and uninstall behavior remain in the owner
+physical-acceptance matrix below.
 
 ## Purpose and boundaries
 
@@ -25,7 +56,7 @@ The following remain outside this plan:
 - #60 physical uninstall/reinstall verification
 - additional hierarchy below project → bucket → task
 
-## Current architecture
+## Starting architecture at the recorded baseline
 
 - `src/App.tsx` owns application composition and most transient UI state. It wires
   project/bucket/task actions, sidepanel controls, native drag/drop, selection,
@@ -73,11 +104,12 @@ New or revised transient state is intentionally not stored in planner records:
   Archive / View Options, and Data; all default closed per UI session.
 - `pendingProjectImport`: parsed source, selected source project, destination mode,
   and selected existing destination project.
-- `pasteUndo`: project ID, destination bucket ID/name, and the exact task IDs
+- `pasteUndo`: project ID, reader-facing destination name, and the exact task IDs
   created by the latest paste transaction.
 
-The internal paste buffer remains transient and always follows the latest explicit
-Copy action. It is independent from the explicit selection set.
+The internal paste buffer remains transient and follows the latest compatible
+task or bucket Copy action. Copy project clears it so an older task buffer cannot
+masquerade as the latest copy. It is independent from the explicit selection set.
 
 Pure domain and presentation decisions move out of `App.tsx` into focused services:
 
@@ -177,7 +209,22 @@ schema-v2 data object:
   },
   "exportedAt": "2026-07-25T06:30:00.000Z",
   "data": {
-    "version": 2
+    "version": 2,
+    "projects": [
+      {
+        "id": "source-id",
+        "name": "Project name",
+        "description": "Synthetic example",
+        "priority": 0,
+        "pinned": false,
+        "createdAt": "2026-07-25T06:00:00.000Z",
+        "updatedAt": "2026-07-25T06:00:00.000Z"
+      }
+    ],
+    "buckets": [],
+    "tasks": [],
+    "templates": [],
+    "templateDefinitions": []
   }
 }
 ```
@@ -234,8 +281,9 @@ Dependencies and records are resolved in this order:
 1. templates by normalized name, otherwise create;
 2. template definitions by normalized name within the mapped template, otherwise
    create;
-3. buckets by mapped template definition when unique, then normalized name,
-   otherwise create;
+3. buckets by mapped template definition when unique, then by normalized name
+   only when template-definition relationships are compatible, otherwise create
+   and report a definition conflict;
 4. tasks by destination bucket plus normalized title and description; duplicates
    are skipped, otherwise create.
 
