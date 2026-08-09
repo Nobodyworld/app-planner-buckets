@@ -103,6 +103,11 @@ export function QuickTaskPanel({
                             className="quick-task-input"
                             value={title}
                             onChange={(event) => onTitleChange(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === 'Enter' && event.nativeEvent.isComposing) {
+                                    event.preventDefault();
+                                }
+                            }}
                             placeholder="Optional when creating only a project or bucket"
                             maxLength={160}
                         />
