@@ -1,3 +1,4 @@
+import { flushSync } from 'react-dom';
 import {
   useId,
   useMemo,
@@ -62,14 +63,24 @@ export function QuickAddCombobox({
     : undefined;
 
   const acceptOption = (option: QuickAddComboboxOption) => {
-    onValueChange(option.label);
-    onSelectionChange(option);
-    setHighlightedIndex(0);
-    setHasNavigated(false);
-    setIsOpen(false);
+    // Enter submits immediately after accepting a suggestion. Flush the parent
+    // selection/value updates before onEnter so submission cannot observe stale
+    // target state. Tab uses the same acceptance path but does not submit.
+    flushSync(() => {
+      onValueChange(option.label);
+      onSelectionChange(option);
+      setHighlightedIndex(0);
+      setHasNavigated(false);
+      setIsOpen(false);
+    });
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter' && event.nativeEvent.isComposing) {
+      event.preventDefault();
+      return;
+    }
+
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       if (filteredOptions.length === 0) return;
       event.preventDefault();
