@@ -1,5 +1,6 @@
 import { act } from 'react';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import {
@@ -1546,20 +1547,12 @@ describe('App integration', () => {
     });
 
     it('supports undo and redo keyboard shortcuts for planner actions', async () => {
+        const user = userEvent.setup();
         render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
         const titleInput = screen.getByLabelText('Task title');
-        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
-        const projectInput = screen.getByRole('combobox', { name: 'Project' });
-        fireEvent.change(titleInput, {
-            target: { value: 'Undo target task' },
-        });
-        fireEvent.keyDown(titleInput, { key: 'Enter' });
-        expect(bucketInput).toHaveFocus();
-        fireEvent.keyDown(bucketInput, { key: 'Enter' });
-        expect(projectInput).toHaveFocus();
-        fireEvent.keyDown(projectInput, { key: 'Enter' });
+        await user.type(titleInput, 'Undo target task{Enter}');
 
         expect(screen.getByRole('button', { name: 'Undo target task' })).toBeInTheDocument();
 
@@ -1585,14 +1578,11 @@ describe('App integration', () => {
             target: { value: 'Draft release notes' },
         });
         const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
-        const projectInput = screen.getByRole('combobox', { name: 'Project' });
         fireEvent.change(bucketInput, {
             target: { value: 'Release Prep' },
         });
 
         fireEvent.keyDown(bucketInput, { key: 'Enter' });
-        expect(projectInput).toHaveFocus();
-        fireEvent.keyDown(projectInput, { key: 'Enter' });
 
         expect(screen.getByRole('heading', { name: 'Release Prep' })).toBeInTheDocument();
 
@@ -1617,7 +1607,6 @@ describe('App integration', () => {
         fireEvent.change(titleInput, { target: { value: 'Retained target task' } });
         fireEvent.change(bucketInput, { target: { value: 'Beta Bucket' } });
         fireEvent.keyDown(bucketInput, { key: 'Enter' });
-        fireEvent.keyDown(projectInput, { key: 'Enter' });
 
         expect(titleInput).toHaveValue('');
         expect(bucketInput).toHaveValue('Beta Bucket');
@@ -1660,7 +1649,8 @@ describe('App integration', () => {
         const projectInput = screen.getByRole('combobox', { name: 'Project' });
         fireEvent.change(titleInput, { target: { value: 'Project-scoped task' } });
         fireEvent.change(bucketInput, { target: { value: 'Shared' } });
-        fireEvent.keyDown(bucketInput, { key: 'Enter' });
+        fireEvent.keyDown(bucketInput, { key: 'Tab' });
+        fireEvent.focus(projectInput);
 
         fireEvent.change(projectInput, { target: { value: 'Alpha' } });
         expect(bucketInput).toHaveValue('Shared');
@@ -1675,7 +1665,8 @@ describe('App integration', () => {
         expect(screen.queryByRole('option', { name: 'Beta Bucket' })).not.toBeInTheDocument();
 
         fireEvent.change(bucketInput, { target: { value: 'Shared' } });
-        fireEvent.keyDown(bucketInput, { key: 'Enter' });
+        fireEvent.keyDown(bucketInput, { key: 'Tab' });
+        fireEvent.focus(projectInput);
         fireEvent.keyDown(projectInput, { key: 'Enter' });
 
         const saved = readRuntimePlannerData();
@@ -1737,7 +1728,6 @@ describe('App integration', () => {
         });
 
         fireEvent.keyDown(screen.getByRole('combobox', { name: 'Bucket' }), { key: 'Enter' });
-        fireEvent.keyDown(screen.getByRole('combobox', { name: 'Project' }), { key: 'Enter' });
 
         const saved = readRuntimePlannerData();
         const createdBucket = saved.buckets.find((bucket) => bucket.name === '@@@');
@@ -1747,7 +1737,7 @@ describe('App integration', () => {
         expect(createdTask?.bucketId).toBe(createdBucket?.id);
     });
 
-    it('accepts a filtered bucket option with Enter and submits from the Project field', () => {
+    it('accepts a filtered bucket option with Enter and submits immediately from Bucket', () => {
         render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
@@ -1764,9 +1754,6 @@ describe('App integration', () => {
         fireEvent.keyDown(bucketInput, { key: 'Enter' });
 
         expect((bucketInput as HTMLInputElement).value).toBe('To Do');
-        const projectInput = screen.getByRole('combobox', { name: 'Project' });
-        expect(projectInput).toHaveFocus();
-        fireEvent.keyDown(projectInput, { key: 'Enter' });
 
         const saved = readRuntimePlannerData();
         const createdTask = saved.tasks.find((task) => task.title === 'Call supplier');

@@ -106,7 +106,7 @@ describe('QuickAddCombobox', () => {
     expect(screen.getByLabelText('Next field')).toHaveFocus();
   });
 
-  it('advances on blank Enter without accepting the first option', async () => {
+  it('submits on blank Enter without accepting the first option', async () => {
     const user = userEvent.setup();
     const onEnter = vi.fn();
     render(<Harness onEnter={onEnter} />);
