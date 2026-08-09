@@ -1,4 +1,4 @@
-import { useMemo, type RefObject } from 'react';
+import { useMemo, useRef, type RefObject } from 'react';
 import {
     QuickAddCombobox,
     type QuickAddComboboxOption,
@@ -81,6 +81,8 @@ export function QuickTaskPanel({
 }: QuickTaskPanelProps) {
     const projectOptions = useMemo(() => buildOptions(projects, 'Project'), [projects]);
     const bucketOptions = useMemo(() => buildOptions(projectBuckets, 'Bucket'), [projectBuckets]);
+    const onSubmitRef = useRef(onSubmit);
+    onSubmitRef.current = onSubmit;
 
     return (
         <section className="panel-card" aria-label="Quick add">
@@ -90,7 +92,7 @@ export function QuickTaskPanel({
                     className="quick-task-fields"
                     onSubmit={(event) => {
                         event.preventDefault();
-                        onSubmit();
+                        onSubmitRef.current();
                     }}
                 >
                     <div className="quick-task-input-stack">
@@ -120,7 +122,7 @@ export function QuickTaskPanel({
                             placeholder="Unassigned"
                             onValueChange={onBucketNameChange}
                             onSelectionChange={(option) => onBucketSelectionChange(option?.id ?? null)}
-                            onEnter={(acceptedOption) => onSubmit(acceptedOption
+                            onEnter={(acceptedOption) => onSubmitRef.current(acceptedOption
                                 ? {
                                     bucketName: acceptedOption.label,
                                     selectedBucketId: acceptedOption.id,
@@ -136,7 +138,7 @@ export function QuickTaskPanel({
                             placeholder="Current project"
                             onValueChange={onProjectNameChange}
                             onSelectionChange={(option) => onProjectSelectionChange(option?.id ?? null)}
-                            onEnter={(acceptedOption) => onSubmit(acceptedOption
+                            onEnter={(acceptedOption) => onSubmitRef.current(acceptedOption
                                 ? {
                                     projectName: acceptedOption.label,
                                     selectedProjectId: acceptedOption.id,
