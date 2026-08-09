@@ -1,4 +1,4 @@
-import { useMemo, type KeyboardEvent, type RefObject } from 'react';
+import { useMemo, type RefObject } from 'react';
 import {
     QuickAddCombobox,
     type QuickAddComboboxOption,
@@ -6,6 +6,8 @@ import {
 import type { BucketV2 as Bucket, Project } from '../../types/v2';
 
 interface QuickAddTargetOverride {
+    bucketName?: string;
+    selectedBucketId?: string | null;
     projectName?: string;
     selectedProjectId?: string | null;
 }
@@ -80,12 +82,6 @@ export function QuickTaskPanel({
     const projectOptions = useMemo(() => buildOptions(projects, 'Project'), [projects]);
     const bucketOptions = useMemo(() => buildOptions(projectBuckets, 'Bucket'), [projectBuckets]);
 
-    const handleTitleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-        if (event.key !== 'Enter') return;
-        event.preventDefault();
-        bucketInputRef.current?.focus();
-    };
-
     return (
         <section className="panel-card" aria-label="Quick add">
             <h2>Quick Add</h2>
@@ -107,7 +103,6 @@ export function QuickTaskPanel({
                             className="quick-task-input"
                             value={title}
                             onChange={(event) => onTitleChange(event.target.value)}
-                            onKeyDown={handleTitleKeyDown}
                             placeholder="Optional when creating only a project or bucket"
                             maxLength={160}
                         />
@@ -120,7 +115,12 @@ export function QuickTaskPanel({
                             placeholder="Unassigned"
                             onValueChange={onBucketNameChange}
                             onSelectionChange={(option) => onBucketSelectionChange(option?.id ?? null)}
-                            onEnter={() => projectInputRef.current?.focus()}
+                            onEnter={(acceptedOption) => onSubmit(acceptedOption
+                                ? {
+                                    bucketName: acceptedOption.label,
+                                    selectedBucketId: acceptedOption.id,
+                                }
+                                : undefined)}
                         />
                         <QuickAddCombobox
                             inputRef={projectInputRef}
