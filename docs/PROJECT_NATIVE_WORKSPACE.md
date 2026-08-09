@@ -62,12 +62,14 @@ names already exist, the suggestions identify their ordinal positions so the
 target can be chosen explicitly. A newly created project becomes active.
 
 Project and Bucket are accessible comboboxes. Typing filters their suggestions.
-Use Up/Down Arrow to move through options, Escape to close a list, and Tab to
-accept the highlighted match and move forward. Enter in Task title advances to
-Bucket; Enter in Bucket advances to Project; Enter in Project accepts a
-highlighted option when present and submits. After a task is added, only its title
-is cleared. The chosen project and bucket remain selected, and changing the
-project immediately refreshes the available bucket suggestions.
+Use Up/Down Arrow to move through options and Escape to close a list. Tab accepts
+the highlighted suggestion when applicable and moves forward; Shift+Tab moves
+backward without submitting. Enter in Task title, Bucket, or Project submits
+immediately; in a combobox, any highlighted match is resolved as part of that
+submission. The Add button performs the same submission. IME-composition Enter
+does not submit prematurely. After a task is added, only its title is cleared.
+The resolved project and bucket remain selected, and changing the project
+immediately refreshes the available bucket suggestions.
 
 The sidepanel order is:
 
@@ -432,8 +434,10 @@ dragging, clipboard integration, focus, or installer behavior.
 - [ ] Use Quick Add for an existing target, a new bucket, a new project, both new
   targets, bucket-only creation, and project-only creation; confirm only the task
   title clears after adding a task.
-- [ ] Exercise Up/Down Arrow, Tab, Enter, Escape, duplicate-name descriptions, and
-  project-dependent bucket suggestions in Quick Add.
+- [ ] Exercise Up/Down Arrow, Escape, Tab forward acceptance, Shift+Tab backward
+  navigation, Enter submission from each field, Add-button submission, IME
+  composition, duplicate-name descriptions, and project-dependent bucket
+  suggestions in Quick Add.
 - [ ] Confirm the required sidepanel order and independently toggle each
   secondary disclosure at normal and narrow widths.
 - [ ] Select one task, a whole bucket, and part of a bucket; verify selected count,

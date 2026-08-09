@@ -79,7 +79,10 @@ Project and board management:
 - Permanent Unassigned lane for unbucketed tasks
 - Pin buckets into the left group for stable triage workflows
 - Two-axis board navigation with persistent 70%-110% zoom
-- Quick Add targeting an existing or new project and bucket
+- Quick Add targeting an existing or new project and bucket; Enter submits from
+  Task title, Bucket, or Project, Tab accepts an applicable suggestion and moves
+  forward, Shift+Tab moves backward without submitting, Up/Down Arrow navigate
+  suggestions, Escape closes them, and Add performs the same submission
 
 Task workflow:
 

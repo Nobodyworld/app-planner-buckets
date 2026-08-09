@@ -388,7 +388,9 @@ Rollback: revert this commit; the old zoom key remains available and unchanged.
 - Apply the resolved optional project, bucket, and task as one reducer transition
   so history and relational validation cannot observe a partial combination.
 - Add accessible project and bucket comboboxes with filtered options, arrow
-  navigation, Tab acceptance, and final-field Enter submit.
+  navigation, Escape dismissal, Tab forward acceptance/navigation, Shift+Tab
+  reverse navigation, Enter submission from Task title, Bucket, or Project, and
+  equivalent Add-button submission. Ignore Enter while IME composition is active.
 - Support task, bucket, project, and all meaningful combinations.
 - Retain resolved project/bucket targets after task creation; clear only title.
 - Activate newly created projects and refresh bucket options on project changes.
@@ -496,7 +498,9 @@ does not rewrite planner schema or existing history.
 - new project, new bucket, task with either/both
 - project-only/bucket-only creation
 - whitespace no-op and normalized duplicate reuse
-- filtered autocomplete, arrow movement, Tab acceptance, final Enter
+- filtered autocomplete, arrow movement, Escape dismissal, Tab forward
+  acceptance/navigation, Shift+Tab reverse navigation, Enter submission from
+  every field, Add-button equivalence, and IME-composition safety
 - retained targets and project-dependent bucket options
 - required sidebar order, default disclosures, independent toggle, ARIA state
 
@@ -600,7 +604,7 @@ The owner performs these checks against the exact committed installer:
 | --- | --- | --- |
 | Board | Tall and wide realistic synthetic/migrated board, sidepanel closed | Both axes reach all cards and entry controls without a nested-scroll trap |
 | Zoom | 70%, 90%, and 110% | Readable controls, accurate drag midpoint, no header overflow |
-| Quick Add | Repeated tasks into retained existing/new project and bucket | Only title clears; target project/bucket remains correct |
+| Quick Add | Enter from each field; Tab/Shift+Tab navigation; arrows; Escape; Add button; IME composition; repeated tasks into retained existing/new targets | Every submit path creates exactly once, IME Enter waits, only title clears, and the target project/bucket remains correct |
 | Sidebar | Toggle every secondary section at narrow and normal widths | Required order, independent disclosure, stable scrolling/focus |
 | Selection | Select tasks and partial/whole buckets | Count, indeterminate state, Copy selected, and Clear all are correct |
 | Copy independence | Copy unrelated task/bucket while a selection exists | Selection remains intact; paste buffer follows latest Copy |
