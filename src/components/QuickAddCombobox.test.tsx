@@ -13,14 +13,33 @@ const options: QuickAddComboboxOption[] = [
   { id: 'gamma', label: 'Gamma' },
 ];
 
+const duplicateOptions: QuickAddComboboxOption[] = [
+  {
+    id: 'shared-first',
+    label: 'Shared',
+    description: 'Project 1 of 2 with this name',
+  },
+  {
+    id: 'shared-second',
+    label: 'Shared',
+    description: 'Project 2 of 2 with this name',
+  },
+];
+
 function Harness({
   onEnter = () => undefined,
+  comboboxOptions = options,
+  initialValue = '',
+  initialSelectedId = null,
 }: {
   onEnter?: (option: QuickAddComboboxOption | null) => void;
+  comboboxOptions?: QuickAddComboboxOption[];
+  initialValue?: string;
+  initialSelectedId?: string | null;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
-  const [value, setValue] = useState('');
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [value, setValue] = useState(initialValue);
+  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
 
   return (
     <>
@@ -29,12 +48,13 @@ function Harness({
         label="Project"
         value={value}
         selectedId={selectedId}
-        options={options}
+        options={comboboxOptions}
         placeholder="Current project"
         onValueChange={setValue}
         onSelectionChange={(option) => setSelectedId(option?.id ?? null)}
         onEnter={onEnter}
       />
+      <output data-testid="selected-option-id">{selectedId ?? ''}</output>
       <input aria-label="Next field" />
     </>
   );
@@ -117,5 +137,52 @@ describe('QuickAddCombobox', () => {
 
     expect(input).toHaveValue('');
     expect(onEnter).toHaveBeenCalledWith(null);
+  });
+
+  it('highlights and submits the retained duplicate identity after refocus', async () => {
+    const user = userEvent.setup();
+    const onEnter = vi.fn();
+    render(
+      <Harness
+        onEnter={onEnter}
+        comboboxOptions={duplicateOptions}
+        initialValue="Shared"
+        initialSelectedId="shared-second"
+      />,
+    );
+
+    const input = screen.getByRole('combobox', { name: 'Project' });
+    await user.click(input);
+
+    const renderedOptions = screen.getAllByRole('option');
+    expect(renderedOptions[1]).toHaveAttribute('aria-selected', 'true');
+    expect(input).toHaveAttribute('aria-activedescendant', renderedOptions[1].id);
+
+    await user.keyboard('{Enter}');
+
+    expect(onEnter).toHaveBeenCalledTimes(1);
+    expect(onEnter).toHaveBeenCalledWith(duplicateOptions[1]);
+    expect(screen.getByTestId('selected-option-id')).toHaveTextContent('shared-second');
+  });
+
+  it('preserves the retained duplicate identity when Tab accepts and advances', async () => {
+    const user = userEvent.setup();
+    const onEnter = vi.fn();
+    render(
+      <Harness
+        onEnter={onEnter}
+        comboboxOptions={duplicateOptions}
+        initialValue="Shared"
+        initialSelectedId="shared-second"
+      />,
+    );
+
+    const input = screen.getByRole('combobox', { name: 'Project' });
+    await user.click(input);
+    await user.tab();
+
+    expect(onEnter).not.toHaveBeenCalled();
+    expect(screen.getByTestId('selected-option-id')).toHaveTextContent('shared-second');
+    expect(screen.getByLabelText('Next field')).toHaveFocus();
   });
 });

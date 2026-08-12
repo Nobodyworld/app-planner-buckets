@@ -52,6 +52,10 @@ export function QuickAddCombobox({
       ? options.filter((option) => option.label.toLocaleLowerCase().includes(filterValue))
       : options
   ), [filterValue, options]);
+  const retainedSelectionIndex = selectedId === null
+    ? -1
+    : filteredOptions.findIndex((option) => option.id === selectedId);
+  const preferredFocusIndex = retainedSelectionIndex >= 0 ? retainedSelectionIndex : 0;
   const safeHighlightedIndex = filteredOptions.length === 0
     ? -1
     : Math.min(highlightedIndex, filteredOptions.length - 1);
@@ -144,7 +148,10 @@ export function QuickAddCombobox({
         aria-controls={listboxId}
         aria-activedescendant={activeDescendantId}
         onFocus={() => {
-          setHighlightedIndex(0);
+          // Preserve the explicitly selected entity when duplicate labels filter
+          // to more than one option. Keyboard acceptance must follow identity,
+          // not silently fall back to the first visible duplicate.
+          setHighlightedIndex(preferredFocusIndex);
           setHasNavigated(false);
           setIsOpen(true);
         }}

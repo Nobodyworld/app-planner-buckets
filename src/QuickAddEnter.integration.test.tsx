@@ -38,9 +38,60 @@ const fixture: PlannerDataV2 = {
   templateDefinitions: [],
 };
 
-const seed = () => {
+const duplicateIdentityFixture: PlannerDataV2 = {
+  version: 2,
+  projects: [
+    {
+      id: 'project-shared-first',
+      name: 'Shared Project',
+      description: 'First duplicate project',
+      priority: 0,
+      pinned: true,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+    {
+      id: 'project-shared-second',
+      name: 'Shared Project',
+      description: 'Second duplicate project',
+      priority: 1,
+      pinned: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+  ],
+  buckets: [
+    {
+      id: 'bucket-shared-first',
+      projectId: 'project-shared-first',
+      name: 'Shared Bucket',
+      description: 'First duplicate bucket',
+      templateDefinitionId: null,
+      priority: 0,
+      pinned: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+    {
+      id: 'bucket-shared-second',
+      projectId: 'project-shared-first',
+      name: 'Shared Bucket',
+      description: 'Second duplicate bucket',
+      templateDefinitionId: null,
+      priority: 1,
+      pinned: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+  ],
+  tasks: [],
+  templates: [],
+  templateDefinitions: [],
+};
+
+const seed = (data: PlannerDataV2 = fixture) => {
   localStorage.clear();
-  localStorage.setItem(V2_STORAGE_KEY, JSON.stringify(fixture));
+  localStorage.setItem(V2_STORAGE_KEY, JSON.stringify(data));
 };
 
 const readPlanner = (): PlannerDataV2 => (
@@ -103,6 +154,95 @@ describe('Quick Add Enter integration', () => {
       expect(task).toMatchObject({
         projectId: 'project-main',
         bucketId: 'bucket-ready',
+      });
+    });
+  });
+
+  it('keeps the explicitly selected duplicate project on refocus and Enter', async () => {
+    seed(duplicateIdentityFixture);
+    const user = userEvent.setup();
+    render(<App />);
+
+    const projectInput = screen.getByRole('combobox', { name: 'Project' });
+    await user.click(projectInput);
+    await user.click(screen.getByRole('option', { name: /Project 2 of 2 with this name/ }));
+    await user.type(screen.getByLabelText('Task title'), 'duplicate-project-enter');
+    await user.click(projectInput);
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      const task = readPlanner().tasks.find((candidate) => candidate.title === 'duplicate-project-enter');
+      expect(task).toMatchObject({
+        projectId: 'project-shared-second',
+        bucketId: null,
+      });
+    });
+  });
+
+  it('keeps the explicitly selected duplicate project on refocus, Tab, and Add', async () => {
+    seed(duplicateIdentityFixture);
+    const user = userEvent.setup();
+    render(<App />);
+
+    const projectInput = screen.getByRole('combobox', { name: 'Project' });
+    await user.click(projectInput);
+    await user.click(screen.getByRole('option', { name: /Project 2 of 2 with this name/ }));
+    await user.type(screen.getByLabelText('Task title'), 'duplicate-project-tab');
+    await user.click(projectInput);
+    await user.tab();
+
+    const addButton = screen.getByRole('button', { name: 'Add' });
+    expect(addButton).toHaveFocus();
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      const task = readPlanner().tasks.find((candidate) => candidate.title === 'duplicate-project-tab');
+      expect(task).toMatchObject({
+        projectId: 'project-shared-second',
+        bucketId: null,
+      });
+    });
+  });
+
+  it('keeps the explicitly selected duplicate bucket on refocus and Enter', async () => {
+    seed(duplicateIdentityFixture);
+    const user = userEvent.setup();
+    render(<App />);
+
+    const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+    await user.click(bucketInput);
+    await user.click(screen.getByRole('option', { name: /Bucket 2 of 2 with this name/ }));
+    await user.type(screen.getByLabelText('Task title'), 'duplicate-bucket-enter');
+    await user.click(bucketInput);
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      const task = readPlanner().tasks.find((candidate) => candidate.title === 'duplicate-bucket-enter');
+      expect(task).toMatchObject({
+        projectId: 'project-shared-first',
+        bucketId: 'bucket-shared-second',
+      });
+    });
+  });
+
+  it('keeps the explicitly selected duplicate bucket on refocus, Tab, and Add', async () => {
+    seed(duplicateIdentityFixture);
+    const user = userEvent.setup();
+    render(<App />);
+
+    const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+    await user.click(bucketInput);
+    await user.click(screen.getByRole('option', { name: /Bucket 2 of 2 with this name/ }));
+    await user.type(screen.getByLabelText('Task title'), 'duplicate-bucket-tab');
+    await user.click(bucketInput);
+    await user.tab();
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    await waitFor(() => {
+      const task = readPlanner().tasks.find((candidate) => candidate.title === 'duplicate-bucket-tab');
+      expect(task).toMatchObject({
+        projectId: 'project-shared-first',
+        bucketId: 'bucket-shared-second',
       });
     });
   });
