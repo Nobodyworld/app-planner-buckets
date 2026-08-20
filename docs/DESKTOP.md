@@ -49,23 +49,27 @@ The configured current-user installer does not require elevated installation and
 
 ## Hosted installer artifacts and provenance
 
-For any CI run that includes the current provenance workflow, the `desktop-windows` job retains the exact CI-built NSIS candidate for 30 days. The artifact name is:
+For any CI run that includes the current provenance workflow, the `desktop-windows` job retains the exact CI-built NSIS candidate for 30 days. For pull requests, that job checks out and verifies the exact pull-request head rather than packaging GitHub's synthetic merge commit. The workflow merge SHA is still recorded separately for traceability.
+
+The artifact name is:
 
 ```text
-planner-buckets-windows-<application-version>-<full-source-sha>
+planner-buckets-windows-<application-version>-<full-source-sha>-run-<run-id>-attempt-<attempt>
 ```
+
+Including the run ID and attempt keeps immutable artifacts distinct when one source SHA is rebuilt or a workflow is rerun.
 
 The uploaded artifact contains:
 
 - the exact NSIS installer produced by `npm run desktop:build`;
 - `<installer-filename>.sha256`, containing the installer's SHA-256 digest; and
-- `provenance.json`, recording the application version, full source SHA, source ref, workflow run and attempt, runner and toolchain versions, installer filename, byte size, build time, and SHA-256.
+- `provenance.json`, recording the application version, full source SHA, expected source SHA, workflow and pull-request SHAs, source ref, workflow run and attempt, runner and toolchain versions, installer filename, byte size, build time, and SHA-256.
 
 The workflow summary also records the hosted artifact ID, URL, and immutable artifact-archive digest returned by GitHub Actions.
 
 Use this policy for an exact acceptance candidate:
 
-1. Record the source SHA, workflow run ID, artifact name, installer filename, byte size, and installer SHA-256.
+1. Record the source SHA, workflow run ID and attempt, artifact name, installer filename, byte size, and installer SHA-256.
 2. Download the retained artifact and verify the installer against its adjacent `.sha256` file before installation.
 3. Preserve that downloaded installer unchanged while physical acceptance is in progress.
 4. Treat any rebuild—even from the same source SHA—as a new candidate with its own identity and evidence.

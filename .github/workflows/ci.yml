@@ -124,7 +124,7 @@ jobs:
           }
 
           $installer = $installers[0]
-          $artifactName = "planner-buckets-windows-$version-$sourceSha"
+          $artifactName = "planner-buckets-windows-$version-$sourceSha-run-$($env:PLANNER_RUN_ID)-attempt-$($env:PLANNER_RUN_ATTEMPT)"
           $artifactDirectory = Join-Path $env:RUNNER_TEMP $artifactName
 
           if (Test-Path -LiteralPath $artifactDirectory) {
