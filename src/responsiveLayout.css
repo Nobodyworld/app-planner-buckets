@@ -1,0 +1,23 @@
+/*
+ * Narrow-layout cascade corrections.
+ *
+ * This file intentionally loads after styles.css so the state-specific desktop
+ * grid selectors cannot override the stacked layout below 800px.
+ */
+@media (max-width: 800px) {
+  body {
+    overflow: auto;
+  }
+
+  .workspace-layout.sidepanel-open .board-stage,
+  .workspace-layout.sidepanel-closed .board-stage {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .board-stage-toolbar,
+  .sidepanel,
+  .board-frame {
+    width: 100%;
+    min-width: 0;
+  }
+}
