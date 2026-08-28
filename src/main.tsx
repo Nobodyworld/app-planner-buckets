@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import { installBoardScrollChaining } from './services/boardScrollChaining';
 import { registerPlannerStorageRuntimeBridge } from './storage/plannerStorageBridge';
-import { bootstrapPlannerStorageRuntime } from './storage/plannerStorageRuntime';
+import { bootstrapPlannerStorageRuntime } from './storage/plannerStorageBootstrap';
 import './styles.css';
 import './responsiveLayout.css';
 import './storageStatus.css';
