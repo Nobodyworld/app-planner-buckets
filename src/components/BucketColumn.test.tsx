@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
+import type { BucketTaskSelectionState } from '../services/plannerSelection';
 import type { BucketV2, PlannerTaskV2 } from '../types/v2';
 import { BucketColumn } from './BucketColumn';
 
@@ -40,6 +41,9 @@ interface RenderBucketOptions {
     canPasteIntoBucket?: boolean;
     canMoveBucketLeft?: boolean;
     canMoveBucketRight?: boolean;
+    withSelection?: boolean;
+    selectedTaskIds?: ReadonlySet<string>;
+    bucketSelectionState?: BucketTaskSelectionState;
 }
 
 const renderBucket = (
@@ -59,6 +63,8 @@ const renderBucket = (
     const onToggleBucketPin = vi.fn();
     const onRenameBucket = vi.fn();
     const onDeleteBucket = vi.fn();
+    const onTaskSelectionChange = vi.fn();
+    const onBucketSelectionChange = vi.fn();
     let currentOptions = options;
     const renderColumn = (nextOptions: RenderBucketOptions) => (
         <BucketColumn
@@ -82,6 +88,10 @@ const renderBucket = (
             onToggleTaskPin={vi.fn()}
             onDragStart={vi.fn()}
             onDragEnd={vi.fn()}
+            selectedTaskIds={nextOptions.selectedTaskIds}
+            bucketSelectionState={nextOptions.bucketSelectionState}
+            onTaskSelectionChange={nextOptions.withSelection ? onTaskSelectionChange : undefined}
+            onBucketSelectionChange={nextOptions.withSelection ? onBucketSelectionChange : undefined}
             onBucketDragStart={onBucketDragStart}
             onBucketDragEnd={onBucketDragEnd}
             onBucketDragHover={onBucketDragHover}
@@ -116,6 +126,8 @@ const renderBucket = (
         onToggleBucketPin,
         onRenameBucket,
         onDeleteBucket,
+        onTaskSelectionChange,
+        onBucketSelectionChange,
     };
 };
 
@@ -214,15 +226,16 @@ describe('BucketColumn entrance and settle animations', () => {
 describe('BucketColumn drag handle', () => {
     it.each([false, true])('renders an enabled draggable handle when pinned is %s', (pinned) => {
         renderBucket(makeBucket(pinned));
-        const handle = screen.getByRole('img', { name: 'Drag to move bucket' });
+        const handle = screen.getByRole('button', { name: 'Drag to move bucket' });
         expect(handle).toHaveAttribute('draggable', 'true');
-        expect(handle.tagName).toBe('SPAN');
-        expect(handle).toHaveAttribute('tabindex', '0');
+        expect(handle.tagName).toBe('BUTTON');
+        expect(handle.tabIndex).toBe(0);
+        expect(handle).toHaveAttribute('aria-keyshortcuts', 'ArrowLeft ArrowRight');
     });
 
     it('keeps a newly highlighted bucket draggable at a high stagger index', () => {
         const { onBucketDragStart } = renderBucket(makeBucket(), true);
-        const handle = screen.getByRole('img', { name: 'Drag to move bucket' });
+        const handle = screen.getByRole('button', { name: 'Drag to move bucket' });
         const dataTransfer = createDataTransfer();
 
         expect(handle.closest('.bucket-column')).toHaveClass('warp-highlight', 'column-stagger-11');
@@ -235,7 +248,7 @@ describe('BucketColumn drag handle', () => {
 
     it('creates a named translucent preview and removes it on drag end', () => {
         const { onBucketDragEnd } = renderBucket(makeBucket());
-        const handle = screen.getByRole('img', { name: 'Drag to move bucket' });
+        const handle = screen.getByRole('button', { name: 'Drag to move bucket' });
 
         fireEvent.dragStart(handle, { dataTransfer: createDataTransfer() });
         expect(document.querySelector('.bucket-drag-preview')).toHaveTextContent('New bucket');
@@ -247,7 +260,7 @@ describe('BucketColumn drag handle', () => {
 
     it('keeps bucket drag active when only the optional preview setup fails', () => {
         const { unmount, onBucketDragStart } = renderBucket(makeBucket());
-        const handle = screen.getByRole('img', { name: 'Drag to move bucket' });
+        const handle = screen.getByRole('button', { name: 'Drag to move bucket' });
         const failedTransfer = createDataTransfer();
         failedTransfer.setDragImage.mockImplementation(() => { throw new Error('drag image failed'); });
 
@@ -264,13 +277,13 @@ describe('BucketColumn drag handle', () => {
 
     it('marks only the active bucket as the drag source', () => {
         renderBucket(makeBucket(), false, true);
-        expect(screen.getByRole('img', { name: 'Drag to move bucket' }).closest('.bucket-column')).toHaveClass('bucket-drag-source');
+        expect(screen.getByRole('button', { name: 'Drag to move bucket' }).closest('.bucket-column')).toHaveClass('bucket-drag-source');
     });
 
     it('does not remove drag functionality when reduced motion is requested', () => {
         vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: true }));
         const { onBucketDragStart } = renderBucket(makeBucket());
-        const handle = screen.getByRole('img', { name: 'Drag to move bucket' });
+        const handle = screen.getByRole('button', { name: 'Drag to move bucket' });
 
         fireEvent.dragStart(handle, { dataTransfer: createDataTransfer() });
         expect(handle).toHaveAttribute('draggable', 'true');
@@ -285,6 +298,7 @@ describe('BucketColumn header actions', () => {
         const { container } = renderBucket(bucket, false, false, {
             tasks: [{ ...makeTask(), bucketId: bucket.id }],
             withAllHeaderActions: true,
+            withSelection: true,
             canPasteIntoBucket: true,
             canMoveBucketLeft: true,
             canMoveBucketRight: true,
@@ -292,20 +306,23 @@ describe('BucketColumn header actions', () => {
         const column = container.querySelector('.bucket-column') as HTMLElement;
         const header = column.querySelector('.bucket-header') as HTMLElement;
         const actions = header.querySelector('.bucket-actions') as HTMLElement;
+        const primaryRow = actions.querySelector('.bucket-action-row-primary') as HTMLElement;
+        const secondaryRow = actions.querySelector('.bucket-action-row-secondary') as HTMLElement;
         const actionQueries = [
-            ['button', `Copy all tasks in ${bucket.name}`],
+            ['button', `Copy ${bucket.name} as JSON`],
             ['button', `Paste tasks into ${bucket.name}`],
-            ['img', 'Drag to move bucket'],
             ['button', 'Move bucket left'],
             ['button', 'Move bucket right'],
-            ['button', pinned ? 'Unpin bucket' : 'Pin bucket to left group'],
+            ['button', 'Drag to move bucket'],
+            ['checkbox', `Select all visible tasks in ${bucket.name}`],
+            ['button', pinned ? `Unpin ${bucket.name}` : `Pin ${bucket.name} to the left group`],
             ['button', 'Rename bucket'],
             ['button', 'Delete bucket'],
         ] as const;
 
         expect(actions).toBeInTheDocument();
-        expect(actions.children).toHaveLength(8);
-        expect(within(actions).getAllByRole('button')).toHaveLength(7);
+        expect(actions.children).toHaveLength(2);
+        expect(within(actions).getAllByRole('button')).toHaveLength(8);
 
         for (const [role, name] of actionQueries) {
             const control = within(actions).getByRole(role, { name });
@@ -316,6 +333,147 @@ describe('BucketColumn header actions', () => {
             control.focus();
             expect(control).toHaveFocus();
         }
+
+        const copyButton = within(primaryRow).getByRole('button', { name: `Copy ${bucket.name} as JSON` });
+        const pasteButton = within(primaryRow).getByRole('button', { name: `Paste tasks into ${bucket.name}` });
+        const moveLeftButton = within(primaryRow).getByRole('button', { name: 'Move bucket left' });
+        const moveRightButton = within(primaryRow).getByRole('button', { name: 'Move bucket right' });
+        expect(Array.from(primaryRow.children)).toEqual([
+            copyButton,
+            pasteButton,
+            moveLeftButton,
+            moveRightButton,
+        ]);
+
+        const dragHandle = within(secondaryRow).getByRole('button', { name: 'Drag to move bucket' });
+        const selectionCheckbox = within(secondaryRow).getByRole('checkbox', {
+            name: `Select all visible tasks in ${bucket.name}`,
+        });
+        const pinButton = within(secondaryRow).getByRole('button', {
+            name: pinned ? `Unpin ${bucket.name}` : `Pin ${bucket.name} to the left group`,
+        });
+        const renameButton = within(secondaryRow).getByRole('button', { name: 'Rename bucket' });
+        const deleteButton = within(secondaryRow).getByRole('button', { name: 'Delete bucket' });
+        expect(Array.from(secondaryRow.children)).toEqual([
+            dragHandle,
+            selectionCheckbox.closest('.bucket-selection-control'),
+            pinButton,
+            renameButton,
+            deleteButton,
+        ]);
+    });
+
+    it('makes the drag handle keyboard-operable with explicit reorder shortcuts', () => {
+        const bucket = makeBucket();
+        const result = renderBucket(bucket, false, false, {
+            withAllHeaderActions: true,
+            canMoveBucketLeft: true,
+            canMoveBucketRight: true,
+        });
+        const handle = screen.getByRole('button', { name: 'Drag to move bucket' });
+
+        expect(handle).toHaveAttribute('aria-keyshortcuts', 'ArrowLeft ArrowRight');
+        fireEvent.keyDown(handle, { key: 'ArrowLeft' });
+        fireEvent.keyDown(handle, { key: 'ArrowRight' });
+
+        expect(result.onMoveBucketByOffset).toHaveBeenNthCalledWith(1, bucket.id, -1);
+        expect(result.onMoveBucketByOffset).toHaveBeenNthCalledWith(2, bucket.id, 1);
+    });
+
+    it('renders named bucket and task selection as keyboard-operable, controlled checkboxes', () => {
+        const bucket = makeBucket();
+        const task = makeTask();
+        const result = renderBucket(bucket, false, false, {
+            tasks: [task],
+            withSelection: true,
+            selectedTaskIds: new Set(),
+            bucketSelectionState: 'unchecked',
+        });
+
+        const bucketCheckbox = screen.getByRole('checkbox', {
+            name: `Select all visible tasks in ${bucket.name}`,
+        });
+        const taskCheckbox = screen.getByRole('checkbox', {
+            name: `Select "${task.title}" for bulk actions`,
+        });
+        const secondaryRow = result.container.querySelector('.bucket-action-row-secondary') as HTMLElement;
+
+        expect(secondaryRow).toContainElement(bucketCheckbox);
+        expect(result.container.querySelector('.bucket-title-block')).not.toContainElement(bucketCheckbox);
+        bucketCheckbox.focus();
+        expect(bucketCheckbox).toHaveFocus();
+        fireEvent.click(bucketCheckbox);
+        expect(result.onBucketSelectionChange).toHaveBeenCalledWith(true);
+
+        fireEvent.click(taskCheckbox);
+        expect(result.onTaskSelectionChange).toHaveBeenCalledWith(task.id, true);
+
+        result.rerenderBucket({
+            selectedTaskIds: new Set([task.id]),
+            bucketSelectionState: 'indeterminate',
+        });
+        expect(bucketCheckbox).toHaveProperty('indeterminate', true);
+        expect(screen.getByRole('checkbox', {
+            name: `Deselect "${task.title}" for bulk actions`,
+        })).toBeChecked();
+    });
+
+    it('uses the Unassigned label and disables bucket selection when no tasks are visible', () => {
+        const onBucketSelectionChange = vi.fn();
+        const { container } = render(
+            <BucketColumn
+                columnIndex={0}
+                bucket={null}
+                tasks={[]}
+                draggedTaskId={null}
+                draggedAccentIndex={null}
+                highlightedTaskId={null}
+                onQuickAddTask={vi.fn()}
+                onEditTask={vi.fn()}
+                onDeleteTask={vi.fn()}
+                onToggleTask={vi.fn()}
+                onMoveTask={vi.fn()}
+                onToggleTaskPin={vi.fn()}
+                onDragStart={vi.fn()}
+                onDragEnd={vi.fn()}
+                onBucketSelectionChange={onBucketSelectionChange}
+            />,
+        );
+
+        const checkbox = screen.getByRole('checkbox', {
+            name: 'No visible tasks to select in Unassigned',
+        });
+        const actions = container.querySelector('.bucket-actions') as HTMLElement;
+        const primaryRow = actions.querySelector('.bucket-action-row-primary') as HTMLElement;
+        const secondaryRow = actions.querySelector('.bucket-action-row-secondary') as HTMLElement;
+
+        expect(actions.children).toHaveLength(2);
+        expect(primaryRow).toBeEmptyDOMElement();
+        expect(secondaryRow).toContainElement(checkbox);
+        expect(secondaryRow.children).toHaveLength(1);
+        expect(checkbox).toBeDisabled();
+        fireEvent.click(checkbox);
+        expect(onBucketSelectionChange).not.toHaveBeenCalled();
+    });
+
+    it('uses a contained decorative trash SVG instead of an ambiguous multiplication glyph', () => {
+        const { container } = renderBucket(makeBucket(), false, false, {
+            withAllHeaderActions: true,
+        });
+        const column = container.querySelector('.bucket-column') as HTMLElement;
+        const secondaryRow = column.querySelector('.bucket-action-row-secondary') as HTMLElement;
+        const deleteButton = within(secondaryRow).getByRole('button', { name: 'Delete bucket' });
+        const trashIcon = deleteButton.querySelector('svg.bucket-delete-icon') as SVGElement;
+
+        expect(deleteButton).toHaveAttribute('title', 'Delete bucket');
+        expect(deleteButton).toHaveAttribute('aria-label', 'Delete bucket');
+        expect(deleteButton).not.toHaveTextContent('×');
+        expect(trashIcon).toBeInTheDocument();
+        expect(trashIcon).toHaveAttribute('aria-hidden', 'true');
+        expect(trashIcon).toHaveAttribute('focusable', 'false');
+        expect(trashIcon.querySelectorAll('path')).toHaveLength(4);
+        expect(secondaryRow).toContainElement(deleteButton);
+        expect(column).toContainElement(trashIcon);
     });
 
     it.each([
@@ -323,17 +481,15 @@ describe('BucketColumn header actions', () => {
             label: 'empty',
             tasks: [] as PlannerTaskV2[],
             countLabel: '0 tasks',
-            copyLabel: 'No tasks to copy from New bucket',
-            copyDisabled: true,
+            copyLabel: 'Copy New bucket as JSON',
         },
         {
             label: 'populated',
             tasks: [makeTask()],
             countLabel: '1 task',
-            copyLabel: 'Copy all tasks in New bucket',
-            copyDisabled: false,
+            copyLabel: 'Copy New bucket as JSON',
         },
-    ])('keeps all actions in the header for an $label bucket', ({ tasks, countLabel, copyLabel, copyDisabled }) => {
+    ])('keeps all actions in the header for an $label bucket', ({ tasks, countLabel, copyLabel }) => {
         const { container } = renderBucket(makeBucket(), false, false, {
             tasks,
             withAllHeaderActions: true,
@@ -347,8 +503,10 @@ describe('BucketColumn header actions', () => {
         const copyButton = within(actions).getByRole('button', { name: copyLabel });
 
         expect(titleBlock).toHaveTextContent(countLabel);
-        expect(actions.children).toHaveLength(8);
-        expect(copyButton).toHaveProperty('disabled', copyDisabled);
+        expect(actions.children).toHaveLength(2);
+        expect(actions.querySelector('.bucket-action-row-primary')?.children).toHaveLength(4);
+        expect(actions.querySelector('.bucket-action-row-secondary')?.children).toHaveLength(4);
+        expect(copyButton).toBeEnabled();
     });
 
     it.each([
@@ -371,7 +529,9 @@ describe('BucketColumn header actions', () => {
         expect(title.textContent).toBe(name);
         expect(titleBlock.nextElementSibling).toBe(actions);
         expect(header).toContainElement(actions);
-        expect(actions.children).toHaveLength(8);
+        expect(actions.children).toHaveLength(2);
+        expect(actions.querySelector('.bucket-action-row-primary')?.children).toHaveLength(4);
+        expect(actions.querySelector('.bucket-action-row-secondary')?.children).toHaveLength(4);
     });
 });
 

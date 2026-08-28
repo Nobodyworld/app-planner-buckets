@@ -1,11 +1,26 @@
 import { act } from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
+import {
+    BOARD_ZOOM_PERCENTAGES,
+    BOARD_ZOOM_STORAGE_KEY,
+    LEGACY_BOARD_ZOOM_STORAGE_KEY,
+} from './services/boardZoom';
 import type { PlannerData } from './types';
-import type { PlannerDataV2 } from './types/v2';
+import type { PlannerDataV2, PlannerTaskV2 } from './types/v2';
 import { PLANNER_DATA_V2_VERSION } from './types/v2';
 import { isValidPlannerDataV2 } from './types/validators';
+import {
+    buildPlannerScopedExchangeEnvelope,
+    buildProjectExchangeEnvelope,
+    isValidPlannerScopedExchangeEnvelope,
+    isValidProjectExchangeEnvelope,
+    type PlannerScopedExchangeEnvelope,
+    type ProjectExchangeEnvelope,
+} from './services/plannerExport';
+import { RESTORE_RECOVERY_STORAGE_KEY } from './services/restoreRecovery';
 
 const V1_STORAGE_KEY = 'planner-buckets:data:v1';
 const V2_STORAGE_KEY = 'planner-buckets:data:v2';
@@ -128,6 +143,50 @@ const plannerV2Fixture: PlannerDataV2 = {
     ],
     templates: [],
     templateDefinitions: [],
+};
+
+const makeSelectionTask = (
+    id: string,
+    title: string,
+    bucketId: string | null,
+    completed = false,
+): PlannerTaskV2 => ({
+    id,
+    projectId: 'project-b',
+    title,
+    description: '',
+    bucketId,
+    priority: 0,
+    resourceTags: [],
+    pinned: false,
+    completed,
+    archivedAt: null,
+    createdAt: '2026-01-03T00:00:00.000Z',
+    updatedAt: '2026-01-03T00:00:00.000Z',
+});
+
+const selectionFixture: PlannerDataV2 = {
+    ...plannerV2Fixture,
+    buckets: [
+        ...plannerV2Fixture.buckets,
+        {
+            id: 'bucket-beta-second',
+            projectId: 'project-b',
+            name: 'Second Bucket',
+            description: '',
+            templateDefinitionId: null,
+            priority: 0,
+            pinned: false,
+            createdAt: '2026-01-03T00:00:00.000Z',
+            updatedAt: '2026-01-03T00:00:00.000Z',
+        },
+    ],
+    tasks: [
+        makeSelectionTask('task-beta-second', 'Second bucket task', 'bucket-beta-second'),
+        ...plannerV2Fixture.tasks,
+        makeSelectionTask('task-beta-unassigned', 'Beta unassigned', null),
+        makeSelectionTask('task-beta-completed', 'Completed beta task', 'bucket-beta', true),
+    ],
 };
 
 const plannerV2TemplateFixture: PlannerDataV2 = {
@@ -396,6 +455,16 @@ const readRuntimePlannerData = (): PlannerDataV2 => (
     JSON.parse(localStorage.getItem(V2_STORAGE_KEY) ?? '{}') as PlannerDataV2
 );
 
+const expandSidebarSection = (
+    name: 'Projects' | 'Templates' | 'Archive / View Options' | 'Data',
+) => {
+    const toggle = screen.getByRole('button', { name: new RegExp(`^${name}`) });
+    if (toggle.getAttribute('aria-expanded') === 'false') {
+        fireEvent.click(toggle);
+    }
+    return toggle;
+};
+
 const createDragDataTransfer = (): DataTransfer => {
     const values = new Map<string, string>();
     return {
@@ -450,15 +519,19 @@ const fireBoardDrop = (target: HTMLElement, clientX: number, dataTransfer: DataT
     fireEvent(target, event);
 };
 
-const mockBucketColumnGeometry = (column: HTMLElement) => {
+const mockBucketColumnGeometry = (
+    column: HTMLElement,
+    left = 100,
+    width = 200,
+) => {
     vi.spyOn(column, 'getBoundingClientRect').mockReturnValue({
-        x: 100,
+        x: left,
         y: 120,
-        left: 100,
+        left,
         top: 120,
-        right: 300,
+        right: left + width,
         bottom: 620,
-        width: 200,
+        width,
         height: 500,
         toJSON: () => ({}),
     });
@@ -524,6 +597,24 @@ const overflowingBoardFixture: PlannerDataV2 = {
     templateDefinitions: [],
 };
 
+const tallBoardFixture: PlannerDataV2 = {
+    ...overflowingBoardFixture,
+    tasks: Array.from({ length: 24 }, (_, index) => ({
+        id: `task-tall-${index + 1}`,
+        projectId: 'project-overflow',
+        title: `Tall board task ${index + 1}`,
+        description: '',
+        bucketId: 'bucket-overflow-1',
+        priority: 0,
+        resourceTags: [],
+        pinned: false,
+        completed: false,
+        archivedAt: null,
+        createdAt: `2026-02-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+        updatedAt: `2026-02-01T00:00:${String(index).padStart(2, '0')}.000Z`,
+    })),
+};
+
 describe('App integration', () => {
     beforeEach(() => {
         localStorage.clear();
@@ -533,6 +624,81 @@ describe('App integration', () => {
     afterEach(() => {
         vi.useRealTimers();
         vi.restoreAllMocks();
+    });
+
+    it('defaults to a visible persisted 90% board zoom', async () => {
+        const { container } = render(<App />);
+
+        expect(screen.getByLabelText('Board zoom level')).toHaveTextContent('90%');
+        expect(container.querySelector('.board-stage')).toHaveClass('board-zoom-90');
+        await waitFor(() => {
+            expect(localStorage.getItem(BOARD_ZOOM_STORAGE_KEY)).toBe('90');
+        });
+    });
+
+    it.each(BOARD_ZOOM_PERCENTAGES)('loads supported board zoom %i%%', (percent) => {
+        localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, String(percent));
+
+        const { container } = render(<App />);
+
+        expect(screen.getByLabelText('Board zoom level')).toHaveTextContent(`${percent}%`);
+        expect(container.querySelector('.board-stage')).toHaveClass(`board-zoom-${percent}`);
+    });
+
+    it('migrates a legacy zoom index without overwriting the legacy key', async () => {
+        localStorage.setItem(LEGACY_BOARD_ZOOM_STORAGE_KEY, '2');
+
+        render(<App />);
+
+        expect(screen.getByLabelText('Board zoom level')).toHaveTextContent('105%');
+        await waitFor(() => {
+            expect(localStorage.getItem(BOARD_ZOOM_STORAGE_KEY)).toBe('105');
+        });
+        expect(localStorage.getItem(LEGACY_BOARD_ZOOM_STORAGE_KEY)).toBe('2');
+    });
+
+    it('persists zoom steps, preserves horizontal position, and disables endpoint controls', async () => {
+        localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, '70');
+        const firstRender = render(<App />);
+        const { container } = firstRender;
+        const frame = container.querySelector('.board-frame') as HTMLElement;
+        Object.defineProperty(frame, 'scrollLeft', {
+            value: 320,
+            writable: true,
+            configurable: true,
+        });
+
+        expect(screen.getByRole('button', { name: 'Zoom board out' })).toBeDisabled();
+        const zoomIn = screen.getByRole('button', { name: 'Zoom board in' });
+        fireEvent.click(zoomIn);
+
+        expect(screen.getByLabelText('Board zoom level')).toHaveTextContent('75%');
+        expect(container.querySelector('.board-frame')).toBe(frame);
+        expect(frame.scrollLeft).toBe(320);
+        await waitFor(() => {
+            expect(localStorage.getItem(BOARD_ZOOM_STORAGE_KEY)).toBe('75');
+        });
+
+        firstRender.unmount();
+        localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, '110');
+        render(<App />);
+        expect(screen.getByRole('button', { name: 'Zoom board in' })).toBeDisabled();
+        expect(screen.getByRole('button', { name: 'Zoom board out' })).toBeEnabled();
+    });
+
+    it('keeps a tall board and its entry controls inside the focusable closed-sidepanel viewport', () => {
+        localStorage.clear();
+        seedPlannerDataV2(tallBoardFixture);
+        const { container } = render(<App />);
+
+        expect(container.querySelector('.workspace-layout')).toHaveClass('sidepanel-closed');
+        const frame = screen.getByRole('region', { name: 'Overflow board viewport' });
+        expect(frame).toHaveAttribute('tabindex', '0');
+        frame.focus();
+        expect(frame).toHaveFocus();
+        expect(frame).toContainElement(screen.getByRole('button', { name: 'Tall board task 24' }));
+        expect(frame).toContainElement(screen.getAllByRole('button', { name: '+ Add task' })[0]);
+        expect(frame.querySelector('.task-list')).not.toBeNull();
     });
 
     it('auto-opens the sidepanel when hovering the toggle while unlocked', () => {
@@ -550,6 +716,79 @@ describe('App integration', () => {
         });
 
         expect(toggleGroup).toHaveAttribute('data-expanded', 'true');
+    });
+
+    it('orders sidebar cards and keeps each secondary section independently collapsed', () => {
+        render(<App />);
+        fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
+
+        const controls = screen.getByRole('complementary', { name: 'Planner controls' });
+        const cardNames = Array.from(controls.querySelectorAll(':scope > .panel-card')).map((card) => (
+            card.getAttribute('aria-label')
+            ?? card.querySelector('.sidebar-disclosure-title')?.textContent
+        ));
+        expect(cardNames).toEqual([
+            'Quick add',
+            'Create bucket',
+            'Projects',
+            'Templates',
+            'Archive / View Options',
+            'Data',
+        ]);
+
+        const projectsToggle = screen.getByRole('button', { name: /^Projects/ });
+        const templatesToggle = screen.getByRole('button', { name: /^Templates/ });
+        const archiveToggle = screen.getByRole('button', { name: /^Archive \/ View Options/ });
+        const dataToggle = screen.getByRole('button', { name: /^Data/ });
+        [projectsToggle, templatesToggle, archiveToggle, dataToggle].forEach((toggle) => {
+            expect(toggle).toHaveAttribute('aria-expanded', 'false');
+            expect(document.getElementById(toggle.getAttribute('aria-controls') ?? '')).toHaveAttribute('hidden');
+        });
+
+        fireEvent.click(projectsToggle);
+        dataToggle.focus();
+        fireEvent.click(dataToggle);
+        expect(projectsToggle).toHaveAttribute('aria-expanded', 'true');
+        expect(dataToggle).toHaveAttribute('aria-expanded', 'true');
+        expect(templatesToggle).toHaveAttribute('aria-expanded', 'false');
+        expect(archiveToggle).toHaveAttribute('aria-expanded', 'false');
+        expect(dataToggle).toHaveFocus();
+    });
+
+    it('orders Data actions and exposes project scope with accessible selected context', () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        render(<App />);
+        expandSidebarSection('Data');
+
+        const exportButton = screen.getByRole('button', { name: 'Export JSON' });
+        const scopeButton = screen.getByRole('button', { name: 'Choose export scope' });
+        const importButton = screen.getByRole('button', { name: 'Import project JSON' });
+        const restoreButton = screen.getByRole('button', { name: 'Restore from JSON backup' });
+
+        expect(screen.getByText(/Export All data for a full backup/)).toHaveTextContent(
+            'Project, bucket, and Unassigned scopes are exchange files for Project import.',
+        );
+        expect(exportButton.compareDocumentPosition(scopeButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(scopeButton.compareDocumentPosition(importButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(importButton.compareDocumentPosition(restoreButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+        expect(screen.getByRole('group', { name: 'Project import' })).toContainElement(importButton);
+        expect(screen.getByText(/Selected export scope:/)).toHaveTextContent('Selected export scope: All data');
+
+        fireEvent.click(scopeButton);
+        const scopeMenu = screen.getByLabelText('Export scope options');
+        expect(within(scopeMenu).getAllByRole('button').map((button) => button.textContent)).toEqual([
+            'All data',
+            'Project: Beta',
+            'Unassigned tasks',
+            'Bucket: Beta Bucket',
+        ]);
+        const projectScope = within(scopeMenu).getByRole('button', { name: 'Project: Beta' });
+        expect(projectScope).toHaveAttribute('aria-pressed', 'false');
+        fireEvent.click(projectScope);
+        expect(screen.getByText(/Selected export scope:/)).toHaveTextContent(
+            'Selected export scope: Project: Beta',
+        );
     });
 
     it('does not auto-open the sidepanel when auto-open lock is enabled', () => {
@@ -641,7 +880,7 @@ describe('App integration', () => {
         expect(screen.queryByText(/Copied "Write launch summary"/)).not.toBeInTheDocument();
     });
 
-    it('copies a bucket name with its ordered task checklist', async () => {
+    it('copies a bucket as exact structured JSON', async () => {
         const writeText = vi.fn().mockResolvedValue(undefined);
         Object.defineProperty(navigator, 'clipboard', {
             value: { writeText },
@@ -650,19 +889,135 @@ describe('App integration', () => {
 
         render(<App />);
 
-        fireEvent.click(screen.getByRole('button', { name: 'Copy all tasks in To Do' }));
+        fireEvent.change(screen.getByLabelText('Search tasks'), {
+            target: { value: 'not present in any task' },
+        });
+        expect(screen.queryByRole('button', { name: 'Write launch summary' })).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
 
         await waitFor(() => {
             expect(writeText).toHaveBeenCalledTimes(1);
         });
 
-        expect(writeText).toHaveBeenCalledWith('Bucket: To Do\n1. [ ] Write launch summary\n   Note: Include blockers');
+        expect(writeText).toHaveBeenCalledWith(JSON.stringify({
+            bucket: {
+                name: 'To Do',
+                pinned: true,
+            },
+            tasks: [
+                {
+                    title: 'Write launch summary',
+                    description: 'Include blockers',
+                    completed: false,
+                    pinned: false,
+                },
+            ],
+        }, null, 2));
+    });
+
+    it('copies an empty Unassigned document and replaces the latest internal paste buffer', async () => {
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        expect(screen.getByRole('button', { name: 'Paste tasks into Unassigned' })).toBeEnabled();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy Unassigned as JSON' }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+
+        expect(writeText).toHaveBeenLastCalledWith(JSON.stringify({
+            bucket: {
+                name: 'Unassigned',
+                pinned: false,
+            },
+            tasks: [],
+        }, null, 2));
+        screen.getAllByRole('button', { name: 'Copy tasks first to paste' }).forEach((button) => {
+            expect(button).toBeDisabled();
+        });
+    });
+
+    it('copies the full active project as Markdown, clears task paste, and preserves selection', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        fireEvent.click(screen.getByRole('button', { name: 'Copy Beta Bucket as JSON' }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Paste tasks into Unassigned' })).toBeEnabled();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy project' }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+
+        expect(writeText).toHaveBeenLastCalledWith(
+            '# Beta\n'
+            + '\n'
+            + '## Bucket: Beta Bucket\n'
+            + '\n'
+            + '1. [ ] Beta task\n'
+            + '2. [x] Completed beta task\n'
+            + '\n'
+            + '## Bucket: Second Bucket\n'
+            + '\n'
+            + '1. [ ] Second bucket task\n'
+            + '\n'
+            + '## Unassigned\n'
+            + '\n'
+            + '1. [ ] Beta unassigned',
+        );
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Deselect "Beta task" for bulk actions',
+        })).toBeChecked();
+        screen.getAllByRole('button', { name: 'Copy tasks first to paste' }).forEach((button) => {
+            expect(button).toBeDisabled();
+        });
+    });
+
+    it('reports project-copy failure without showing a false success', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const writeText = vi.fn().mockRejectedValue(new Error('clipboard unavailable'));
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+        Object.defineProperty(document, 'execCommand', {
+            value: vi.fn(() => false),
+            configurable: true,
+        });
+
+        const { container } = render(<App />);
+        fireEvent.click(screen.getByRole('button', { name: 'Copy project' }));
+
+        await waitFor(() => {
+            expect(container.querySelector('.search-status')).toHaveTextContent(
+                'Could not copy project "Beta"',
+            );
+        });
+        expect(container.querySelector('.search-status')).not.toHaveTextContent(
+            'Copied project "Beta"',
+        );
     });
 
     it('pastes copied tasks into another bucket', async () => {
         render(<App />);
 
-        fireEvent.click(screen.getByRole('button', { name: 'Copy all tasks in To Do' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
         fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
 
         await waitFor(() => {
@@ -676,14 +1031,528 @@ describe('App integration', () => {
         expect(pastedTask?.bucketId).toBeNull();
     });
 
+    it('offers an accessible latest-paste confirmation and Keep finalizes the tasks', async () => {
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
+
+        const notice = screen.getByRole('region', { name: 'Paste confirmation' });
+        expect(within(notice).getByRole('status')).toHaveTextContent(
+            'Pasted 1 task into Unassigned. Keep it?',
+        );
+        const keep = within(notice).getByRole('button', { name: 'Keep pasted tasks' });
+        keep.focus();
+        expect(keep).toHaveFocus();
+        fireEvent.click(keep);
+
+        expect(screen.queryByRole('region', {
+            name: 'Paste confirmation',
+        })).not.toBeInTheDocument();
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(2);
+        });
+    });
+
+    it('auto-dismisses the paste confirmation after ten seconds without removing tasks', () => {
+        vi.useFakeTimers();
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
+        expect(screen.getByRole('region', {
+            name: 'Paste confirmation',
+        })).toBeInTheDocument();
+
+        act(() => {
+            vi.advanceTimersByTime(10000);
+        });
+
+        expect(screen.queryByRole('region', {
+            name: 'Paste confirmation',
+        })).not.toBeInTheDocument();
+        expect(readRuntimePlannerData().tasks).toHaveLength(2);
+    });
+
+    it('Undo removes only the most recent repeated paste and preserves earlier pasted tasks', async () => {
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        const paste = screen.getByRole('button', { name: 'Paste tasks into Unassigned' });
+        fireEvent.click(paste);
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(2);
+        });
+        const firstPastedTaskId = readRuntimePlannerData().tasks.find(
+            (task) => task.id !== 'task-1',
+        )?.id;
+
+        fireEvent.click(paste);
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(3);
+        });
+        expect(screen.getAllByRole('region', {
+            name: 'Paste confirmation',
+        })).toHaveLength(1);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Undo pasted tasks' }));
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            expect(saved.tasks).toHaveLength(2);
+            expect(saved.tasks.some((task) => task.id === firstPastedTaskId)).toBe(true);
+            expect(saved.tasks.filter((task) => (
+                task.bucketId === null && task.title === 'Write launch summary'
+            ))).toHaveLength(1);
+        });
+        expect(screen.queryByRole('region', {
+            name: 'Paste confirmation',
+        })).not.toBeInTheDocument();
+    });
+
+    it('Undo remains exact and safe after the pasted destination bucket is deleted', async () => {
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into To Do' }));
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(2);
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Delete bucket' }));
+        const deleteDialog = screen.getByRole('dialog', { name: 'Delete bucket' });
+        fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete bucket' }));
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            expect(saved.buckets).toHaveLength(0);
+            expect(saved.tasks.every((task) => task.bucketId === null)).toBe(true);
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Undo pasted tasks' }));
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            expect(saved.tasks).toHaveLength(1);
+            expect(saved.tasks[0].id).toBe('task-1');
+            expect(saved.tasks[0].bucketId).toBeNull();
+        });
+    });
+
+    it('falls back to Unassigned when a keyboard paste target was deleted', async () => {
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy To Do as JSON' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Delete bucket' }));
+        const deleteDialog = screen.getByRole('dialog', { name: 'Delete bucket' });
+        fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete bucket' }));
+        await waitFor(() => {
+            expect(readRuntimePlannerData().buckets).toHaveLength(0);
+        });
+
+        fireEvent.keyDown(window, { key: 'v', ctrlKey: true });
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            expect(saved.tasks).toHaveLength(2);
+            expect(saved.tasks.every((task) => task.bucketId === null)).toBe(true);
+        });
+        expect(within(screen.getByRole('region', {
+            name: 'Paste confirmation',
+        })).getByRole('status')).toHaveTextContent(
+            'Pasted 1 task into Unassigned. Keep it?',
+        );
+    });
+
+    it('clears stale paste confirmation on project switching and destructive Restore', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy Beta Bucket as JSON' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
+        expect(screen.getByRole('region', {
+            name: 'Paste confirmation',
+        })).toBeInTheDocument();
+
+        expandSidebarSection('Projects');
+        fireEvent.change(screen.getByLabelText('Active project'), {
+            target: { value: 'project-a' },
+        });
+        expect(screen.queryByRole('region', {
+            name: 'Paste confirmation',
+        })).not.toBeInTheDocument();
+        expect(readRuntimePlannerData().tasks.filter((task) => (
+            task.projectId === 'project-b' && task.bucketId === null
+        ))).toHaveLength(3);
+
+        fireEvent.change(screen.getByLabelText('Active project'), {
+            target: { value: 'project-b' },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
+        expect(screen.getByRole('region', {
+            name: 'Paste confirmation',
+        })).toBeInTheDocument();
+
+        expandSidebarSection('Data');
+        fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerFixture)], 'replacement.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        fireEvent.click(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        }));
+
+        expect(screen.queryByRole('region', {
+            name: 'Paste confirmation',
+        })).not.toBeInTheDocument();
+    });
+
+    it('manages explicit task, named-bucket, and Unassigned selection independently from completion', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        const { container } = render(<App />);
+
+        const copySelected = screen.getByRole('button', { name: 'Copy selected' });
+        const clearAll = screen.getByRole('button', { name: 'Clear all' });
+        expect(screen.getByText('0 selected')).toHaveAttribute('aria-live', 'polite');
+        expect(copySelected).toBeDisabled();
+        expect(clearAll).toBeDisabled();
+
+        const betaTaskSelection = screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        });
+        betaTaskSelection.focus();
+        expect(betaTaskSelection).toHaveFocus();
+        fireEvent.click(betaTaskSelection);
+
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Deselect "Beta task" for bulk actions',
+        })).toBeChecked();
+
+        const betaBucketSelection = screen.getByRole('checkbox', {
+            name: 'Select all visible tasks in Beta Bucket',
+        });
+        await waitFor(() => expect(betaBucketSelection).toHaveProperty('indeterminate', true));
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Mark "Beta task" complete',
+        }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Deselect "Beta task" for bulk actions',
+        })).toBeChecked();
+        expect(screen.getByRole('button', { name: 'Beta task' }).closest('.task-card')).toHaveClass('completed');
+
+        fireEvent.click(betaBucketSelection);
+        expect(screen.getByText('2 selected')).toBeInTheDocument();
+        const checkedBucketSelection = screen.getByRole('checkbox', {
+            name: 'Deselect all visible tasks in Beta Bucket',
+        });
+        expect(checkedBucketSelection).toBeChecked();
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Deselect "Completed beta task" for bulk actions',
+        }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        await waitFor(() => expect(screen.getByRole('checkbox', {
+            name: 'Select all visible tasks in Beta Bucket',
+        })).toHaveProperty('indeterminate', true));
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select all visible tasks in Beta Bucket',
+        }));
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Deselect all visible tasks in Beta Bucket',
+        }));
+        expect(screen.getByText('0 selected')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select all visible tasks in Unassigned',
+        }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Deselect "Beta unassigned" for bulk actions',
+        })).toBeChecked();
+
+        fireEvent.click(clearAll);
+        expect(screen.getByText('0 selected')).toBeInTheDocument();
+        expect(copySelected).toBeDisabled();
+        expect(clearAll).toBeDisabled();
+        expect(container.querySelectorAll('.task-card.is-selected')).toHaveLength(0);
+    });
+
+    it('keeps task and bucket copy independent while copying selected tasks in visible board order', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Second bucket task" for bulk actions',
+        }));
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta unassigned" for bulk actions',
+        }));
+        expect(screen.getByText('3 selected')).toBeInTheDocument();
+
+        const betaTaskCard = screen.getByRole('button', { name: 'Beta task' }).closest('.task-card') as HTMLElement;
+        fireEvent.click(within(betaTaskCard).getByRole('button', { name: 'Copy' }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+        expect(writeText).toHaveBeenLastCalledWith('[ ] Beta task\nBucket: Beta Bucket');
+        expect(screen.getByText('3 selected')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy Beta Bucket as JSON' }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(2));
+        expect(writeText).toHaveBeenLastCalledWith(JSON.stringify({
+            bucket: {
+                name: 'Beta Bucket',
+                pinned: false,
+            },
+            tasks: [
+                {
+                    title: 'Beta task',
+                    description: '',
+                    completed: false,
+                    pinned: false,
+                },
+                {
+                    title: 'Completed beta task',
+                    description: '',
+                    completed: true,
+                    pinned: false,
+                },
+            ],
+        }, null, 2));
+        expect(screen.getByText('3 selected')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Paste tasks into Unassigned' }));
+        await waitFor(() => {
+            const pastedUnassignedTitles = readRuntimePlannerData().tasks
+                .filter((task) => task.projectId === 'project-b' && task.bucketId === null)
+                .map((task) => task.title);
+            expect(pastedUnassignedTitles).toEqual([
+                'Beta unassigned',
+                'Beta task',
+                'Completed beta task',
+            ]);
+        });
+        expect(screen.getByText('3 selected')).toBeInTheDocument();
+        expect(screen.getAllByRole('checkbox', {
+            name: /Deselect ".+" for bulk actions/,
+        })).toHaveLength(3);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Copy selected' }));
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(3));
+        expect(writeText).toHaveBeenLastCalledWith(
+            '1. [ ] Beta unassigned\n2. [ ] Beta task\n3. [ ] Second bucket task',
+        );
+        expect(screen.getByText('3 selected')).toBeInTheDocument();
+        expect(screen.getAllByRole('checkbox', {
+            name: /Deselect ".+" for bulk actions/,
+        })).toHaveLength(3);
+    });
+
+    it('prunes selection after search, completed filtering, and project switches without restoring hidden selections', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Second bucket task" for bulk actions',
+        }));
+        expect(screen.getByText('2 selected')).toBeInTheDocument();
+
+        fireEvent.change(screen.getByLabelText('Search tasks'), {
+            target: { value: 'Beta' },
+        });
+        await waitFor(() => expect(screen.getByText('1 selected')).toBeInTheDocument());
+
+        fireEvent.change(screen.getByLabelText('Search tasks'), {
+            target: { value: '' },
+        });
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Select "Second bucket task" for bulk actions',
+        })).not.toBeChecked();
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Completed beta task" for bulk actions',
+        }));
+        expect(screen.getByText('2 selected')).toBeInTheDocument();
+        expandSidebarSection('Archive / View Options');
+        fireEvent.click(screen.getByRole('checkbox', { name: 'Show completed' }));
+        await waitFor(() => expect(screen.getByText('1 selected')).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: 'Completed beta task' })).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Show completed again' }));
+        expect(screen.getByRole('checkbox', {
+            name: 'Select "Completed beta task" for bulk actions',
+        })).not.toBeChecked();
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+
+        expandSidebarSection('Projects');
+        fireEvent.change(screen.getByLabelText('Active project'), {
+            target: { value: 'project-a' },
+        });
+        expect(screen.getByText('0 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Select "Alpha task" for bulk actions',
+        })).toBeInTheDocument();
+    });
+
+    it('keeps selection through a visible move and prunes it after delete and archive', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        const betaTaskCard = screen.getByRole('button', { name: 'Beta task' }).closest('.task-card') as HTMLElement;
+        fireEvent.click(within(betaTaskCard).getByRole('button', { name: 'Move task down' }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+        expect(screen.getByRole('checkbox', {
+            name: 'Deselect "Beta task" for bulk actions',
+        })).toBeChecked();
+
+        fireEvent.click(within(betaTaskCard).getByRole('button', { name: 'Delete' }));
+        fireEvent.click(screen.getAllByRole('button', { name: 'Delete task' }).at(-1)!);
+        await waitFor(() => expect(screen.getByText('0 selected')).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: 'Beta task' })).not.toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Completed beta task" for bulk actions',
+        }));
+        expandSidebarSection('Archive / View Options');
+        fireEvent.click(screen.getByRole('button', { name: 'Archive completed (1)' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm archive completed tasks' }));
+        await waitFor(() => expect(screen.getByText('0 selected')).toBeInTheDocument());
+        expect(screen.queryByRole('button', { name: 'Completed beta task' })).not.toBeInTheDocument();
+    });
+
+    it('clears selection on restore even when restored data reuses a selected task id', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+
+        expandSidebarSection('Data');
+        const restoreFile = new File([JSON.stringify(plannerV2Fixture)], 'selection-restore.json', {
+            type: 'application/json',
+        });
+        fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
+            target: { files: [restoreFile] },
+        });
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm restore' })).toBeInTheDocument());
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm restore' }));
+
+        await waitFor(() => expect(screen.getByText('0 selected')).toBeInTheDocument());
+        expect(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        })).not.toBeChecked();
+    });
+
+    it('preserves selected multi-drag and unselected single-drag without mutating explicit selection', () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Completed beta task" for bulk actions',
+        }));
+
+        const taskCard = screen.getByRole('button', { name: 'Beta task' }).closest('.task-card') as HTMLElement;
+        const dragHandle = taskCard.querySelector('.drag-handle') as HTMLElement;
+        const selectedTransfer = createDragDataTransfer();
+        fireEvent.dragStart(dragHandle, { dataTransfer: selectedTransfer });
+
+        expect(JSON.parse(selectedTransfer.getData('application/x-planner-task-ids'))).toEqual([
+            'task-beta',
+            'task-beta-completed',
+        ]);
+        expect(screen.getByText('2 selected')).toBeInTheDocument();
+        fireEvent.dragEnd(dragHandle);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
+        const unselectedTransfer = createDragDataTransfer();
+        fireEvent.dragStart(dragHandle, { dataTransfer: unselectedTransfer });
+
+        expect(JSON.parse(unselectedTransfer.getData('application/x-planner-task-ids'))).toEqual([
+            'task-beta',
+        ]);
+        expect(screen.getByText('0 selected')).toBeInTheDocument();
+    });
+
+    it('routes copy, paste, undo, and redo shortcuts through exactly one transaction path', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(selectionFixture);
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        Object.defineProperty(navigator, 'clipboard', {
+            value: { writeText },
+            configurable: true,
+        });
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('checkbox', {
+            name: 'Select "Beta task" for bulk actions',
+        }));
+        const originalTaskCount = selectionFixture.tasks.length;
+
+        fireEvent.keyDown(window, { key: 'c', ctrlKey: true });
+        await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+        expect(writeText).toHaveBeenLastCalledWith('1. [ ] Beta task');
+        expect(screen.getByText('1 selected')).toBeInTheDocument();
+
+        fireEvent.keyDown(window, { key: 'v', ctrlKey: true });
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(originalTaskCount + 1);
+        });
+        expect(readRuntimePlannerData().tasks.filter((task) => (
+            task.projectId === 'project-b'
+            && task.bucketId === null
+            && task.title === 'Beta task'
+        ))).toHaveLength(1);
+
+        fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(originalTaskCount);
+        });
+
+        fireEvent.keyDown(window, { key: 'y', ctrlKey: true });
+        await waitFor(() => {
+            expect(readRuntimePlannerData().tasks).toHaveLength(originalTaskCount + 1);
+        });
+        expect(writeText).toHaveBeenCalledTimes(1);
+    });
+
     it('supports undo and redo keyboard shortcuts for planner actions', async () => {
+        const user = userEvent.setup();
         render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
-        fireEvent.change(screen.getByLabelText('Quick add task title'), {
-            target: { value: 'Undo target task' },
-        });
-        fireEvent.keyDown(screen.getByLabelText('Quick add task title'), { key: 'Enter' });
+        const titleInput = screen.getByLabelText('Task title');
+        await user.type(titleInput, 'Undo target task{Enter}');
 
         expect(screen.getByRole('button', { name: 'Undo target task' })).toBeInTheDocument();
 
@@ -705,14 +1574,15 @@ describe('App integration', () => {
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
 
-        fireEvent.change(screen.getByLabelText('Quick add task title'), {
+        fireEvent.change(screen.getByLabelText('Task title'), {
             target: { value: 'Draft release notes' },
         });
-        fireEvent.change(screen.getByLabelText('Quick add bucket name'), {
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+        fireEvent.change(bucketInput, {
             target: { value: 'Release Prep' },
         });
 
-        fireEvent.keyDown(screen.getByLabelText('Quick add bucket name'), { key: 'Enter' });
+        fireEvent.keyDown(bucketInput, { key: 'Enter' });
 
         expect(screen.getByRole('heading', { name: 'Release Prep' })).toBeInTheDocument();
 
@@ -724,64 +1594,185 @@ describe('App integration', () => {
         expect(createdTask?.bucketId).toBe(createdBucket?.id);
     });
 
-    it('falls back to Unassigned when quick-add bucket text is invalid', () => {
+    it('clears only the task title after submitting to a chosen project and bucket', () => {
+        localStorage.clear();
+        seedPlannerDataV2();
         render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
 
-        fireEvent.change(screen.getByLabelText('Quick add task title'), {
+        const titleInput = screen.getByLabelText('Task title');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+        const projectInput = screen.getByRole('combobox', { name: 'Project' });
+        fireEvent.change(titleInput, { target: { value: 'Retained target task' } });
+        fireEvent.change(bucketInput, { target: { value: 'Beta Bucket' } });
+        fireEvent.keyDown(bucketInput, { key: 'Enter' });
+
+        expect(titleInput).toHaveValue('');
+        expect(bucketInput).toHaveValue('Beta Bucket');
+        expect(projectInput).toHaveValue('Beta');
+
+        const createdTask = readRuntimePlannerData().tasks.find(
+            (task) => task.title === 'Retained target task',
+        );
+        expect(createdTask).toMatchObject({
+            projectId: 'project-b',
+            bucketId: 'bucket-beta',
+        });
+    });
+
+    it('scopes bucket suggestions and re-resolves a same-name bucket when Project changes', () => {
+        localStorage.clear();
+        const scopedQuickAddFixture: PlannerDataV2 = {
+            ...plannerV2Fixture,
+            buckets: [
+                ...plannerV2Fixture.buckets,
+                {
+                    ...plannerV2Fixture.buckets[0],
+                    id: 'bucket-alpha-shared',
+                    name: 'Shared',
+                },
+                {
+                    ...plannerV2Fixture.buckets[1],
+                    id: 'bucket-beta-shared',
+                    name: 'Shared',
+                },
+            ],
+        };
+        seedPlannerDataV2(scopedQuickAddFixture);
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
+
+        const titleInput = screen.getByLabelText('Task title');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+        const projectInput = screen.getByRole('combobox', { name: 'Project' });
+        fireEvent.change(titleInput, { target: { value: 'Project-scoped task' } });
+        fireEvent.change(bucketInput, { target: { value: 'Shared' } });
+        fireEvent.keyDown(bucketInput, { key: 'Tab' });
+        fireEvent.focus(projectInput);
+
+        fireEvent.change(projectInput, { target: { value: 'Alpha' } });
+        expect(bucketInput).toHaveValue('Shared');
+
+        fireEvent.blur(projectInput);
+        fireEvent.focus(bucketInput);
+        expect(screen.getByRole('option', { name: 'Shared' })).toHaveAttribute('aria-selected', 'true');
+
+        fireEvent.change(bucketInput, { target: { value: '' } });
+        expect(screen.getByRole('option', { name: 'Alpha Bucket' })).toBeInTheDocument();
+        expect(screen.getByRole('option', { name: 'Shared' })).toBeInTheDocument();
+        expect(screen.queryByRole('option', { name: 'Beta Bucket' })).not.toBeInTheDocument();
+
+        fireEvent.change(bucketInput, { target: { value: 'Shared' } });
+        fireEvent.keyDown(bucketInput, { key: 'Tab' });
+        fireEvent.focus(projectInput);
+        fireEvent.keyDown(projectInput, { key: 'Enter' });
+
+        const saved = readRuntimePlannerData();
+        const createdTask = saved.tasks.find((task) => task.title === 'Project-scoped task');
+        expect(createdTask).toMatchObject({
+            projectId: 'project-a',
+            bucketId: 'bucket-alpha-shared',
+        });
+        expect(saved.buckets.filter((bucket) => (
+            bucket.projectId === 'project-a' && bucket.name === 'Shared'
+        ))).toHaveLength(1);
+    });
+
+    it('activates a newly created project from Quick Add', () => {
+        localStorage.clear();
+        seedPlannerDataV2();
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
+
+        const titleInput = screen.getByLabelText('Task title');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
+        const projectInput = screen.getByRole('combobox', { name: 'Project' });
+        fireEvent.change(titleInput, { target: { value: 'Kickoff checklist' } });
+        fireEvent.change(bucketInput, { target: { value: 'Intake' } });
+        fireEvent.change(projectInput, { target: { value: 'Gamma Initiative' } });
+        fireEvent.keyDown(projectInput, { key: 'Enter' });
+
+        const saved = readRuntimePlannerData();
+        const createdProject = saved.projects.find((project) => project.name === 'Gamma Initiative');
+        const createdBucket = saved.buckets.find((bucket) => (
+            bucket.projectId === createdProject?.id && bucket.name === 'Intake'
+        ));
+        const createdTask = saved.tasks.find((task) => task.title === 'Kickoff checklist');
+
+        expect(createdProject).toBeTruthy();
+        expect(createdBucket).toBeTruthy();
+        expect(createdTask).toMatchObject({
+            projectId: createdProject?.id,
+            bucketId: createdBucket?.id,
+        });
+        expect(screen.getByRole('heading', { name: 'Intake' })).toBeInTheDocument();
+        expect(screen.queryByRole('heading', { name: 'Beta Bucket' })).not.toBeInTheDocument();
+        expect(titleInput).toHaveValue('');
+        expect(bucketInput).toHaveValue('Intake');
+        expect(projectInput).toHaveValue('Gamma Initiative');
+    });
+
+    it('creates a novel bucket name and assigns the quick-added task to it', () => {
+        render(<App />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
+
+        fireEvent.change(screen.getByLabelText('Task title'), {
             target: { value: 'Follow up with vendor' },
         });
-        fireEvent.change(screen.getByLabelText('Quick add bucket name'), {
+        fireEvent.change(screen.getByRole('combobox', { name: 'Bucket' }), {
             target: { value: '@@@' },
         });
 
-        fireEvent.keyDown(screen.getByLabelText('Quick add bucket name'), { key: 'Enter' });
+        fireEvent.keyDown(screen.getByRole('combobox', { name: 'Bucket' }), { key: 'Enter' });
 
         const saved = readRuntimePlannerData();
+        const createdBucket = saved.buckets.find((bucket) => bucket.name === '@@@');
         const createdTask = saved.tasks.find((task) => task.title === 'Follow up with vendor');
 
-        expect(createdTask?.bucketId).toBeNull();
-        expect(saved.buckets.some((bucket) => bucket.name === '@@@')).toBe(false);
+        expect(createdBucket).toBeTruthy();
+        expect(createdTask?.bucketId).toBe(createdBucket?.id);
     });
 
-    it('accepts bucket autocomplete with ArrowRight and submits to that bucket', () => {
+    it('accepts a filtered bucket option with Enter and submits immediately from Bucket', () => {
         render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
 
-        fireEvent.change(screen.getByLabelText('Quick add task title'), {
+        fireEvent.change(screen.getByLabelText('Task title'), {
             target: { value: 'Call supplier' },
         });
 
-        const bucketInput = screen.getByLabelText('Quick add bucket name');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
         fireEvent.change(bucketInput, {
             target: { value: 'To' },
         });
-        fireEvent.keyDown(bucketInput, { key: 'ArrowRight' });
+        expect(screen.getByRole('option', { name: 'To Do' })).toBeInTheDocument();
+        fireEvent.keyDown(bucketInput, { key: 'Enter' });
 
         expect((bucketInput as HTMLInputElement).value).toBe('To Do');
-
-        fireEvent.keyDown(bucketInput, { key: 'Enter' });
 
         const saved = readRuntimePlannerData();
         const createdTask = saved.tasks.find((task) => task.title === 'Call supplier');
         expect(createdTask?.bucketId).toBe('bucket-todo');
     });
 
-    it('shows ghost autocomplete suffix in quick bucket input while typing', () => {
-        const { container } = render(<App />);
+    it('shows filtered listbox options in the bucket combobox while typing', () => {
+        render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
 
-        const bucketInput = screen.getByLabelText('Quick add bucket name');
+        const bucketInput = screen.getByRole('combobox', { name: 'Bucket' });
         fireEvent.change(bucketInput, {
             target: { value: 'To' },
         });
 
-        const ghostSuffix = container.querySelector('.quick-task-bucket-ghost-suffix');
-        expect(ghostSuffix).toBeTruthy();
-        expect(ghostSuffix?.textContent).toBe(' Do');
+        expect(bucketInput).toHaveAttribute('aria-expanded', 'true');
+        expect(screen.getByRole('listbox', { name: 'Bucket suggestions' })).toBeInTheDocument();
+        expect(screen.getByRole('option', { name: 'To Do' })).toBeInTheDocument();
     });
 
     it('keeps board inline task input open after submitting tasks', () => {
@@ -813,32 +1804,37 @@ describe('App integration', () => {
         expect(screen.getByRole('heading', { name: 'Board Added Bucket' })).toBeInTheDocument();
     });
 
-    it('horizontally autoscrolls the board when dragging a task near the right edge', async () => {
-        localStorage.clear();
-        seedPlannerDataV2(overflowingBoardFixture);
-        const animationFrameCallbacks = setupAnimationFrameQueue();
-        const { container } = render(<App />);
+    it.each([70, 110] as const)(
+        'horizontally autoscrolls the board when dragging a task near the right edge at %i%% zoom',
+        async (percent) => {
+            localStorage.clear();
+            seedPlannerDataV2(overflowingBoardFixture);
+            localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, String(percent));
+            const animationFrameCallbacks = setupAnimationFrameQueue();
+            const { container } = render(<App />);
 
-        const frame = container.querySelector('.board-frame') as HTMLElement;
-        mockBoardFrameGeometry(frame);
+            expect(container.querySelector('.board-stage')).toHaveClass(`board-zoom-${percent}`);
+            const frame = container.querySelector('.board-frame') as HTMLElement;
+            mockBoardFrameGeometry(frame);
 
-        const taskCard = screen.getByRole('button', { name: 'Overflow task' }).closest('.task-card') as HTMLElement;
-        const dataTransfer = createDragDataTransfer();
+            const taskCard = screen.getByRole('button', { name: 'Overflow task' }).closest('.task-card') as HTMLElement;
+            const dataTransfer = createDragDataTransfer();
 
-        const taskDragHandle = taskCard.querySelector('.drag-handle') as HTMLElement;
-        fireEvent.dragStart(taskDragHandle, { dataTransfer });
-        await waitFor(() => expect(taskCard).toHaveClass('is-dragging'));
-        fireBoardDragOver(frame, 592, dataTransfer);
+            const taskDragHandle = taskCard.querySelector('.drag-handle') as HTMLElement;
+            fireEvent.dragStart(taskDragHandle, { dataTransfer });
+            await waitFor(() => expect(taskCard).toHaveClass('is-dragging'));
+            fireBoardDragOver(frame, 592, dataTransfer);
 
-        await waitFor(() => expect(animationFrameCallbacks.length).toBeGreaterThan(0));
-        act(() => {
-            animationFrameCallbacks.shift()?.(16);
-        });
+            await waitFor(() => expect(animationFrameCallbacks.length).toBeGreaterThan(0));
+            act(() => {
+                animationFrameCallbacks.shift()?.(16);
+            });
 
-        expect(frame.scrollLeft).toBeGreaterThan(0);
+            expect(frame.scrollLeft).toBeGreaterThan(0);
 
-        fireEvent.dragEnd(taskCard);
-    });
+            fireEvent.dragEnd(taskCard);
+        },
+    );
 
     it('horizontally autoscrolls the board when dragging a bucket near the right edge', async () => {
         localStorage.clear();
@@ -849,7 +1845,7 @@ describe('App integration', () => {
         const frame = container.querySelector('.board-frame') as HTMLElement;
         mockBoardFrameGeometry(frame);
 
-        const bucketDragHandle = screen.getAllByRole('img', { name: 'Drag to move bucket' })[0];
+        const bucketDragHandle = screen.getAllByRole('button', { name: 'Drag to move bucket' })[0];
         const dataTransfer = createDragDataTransfer();
 
         fireEvent.dragStart(bucketDragHandle, { dataTransfer });
@@ -877,7 +1873,7 @@ describe('App integration', () => {
         seedPlannerDataV2(overflowingBoardFixture);
         const { container } = render(<App />);
 
-        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+        const bucketHandles = screen.getAllByRole('button', { name: 'Drag to move bucket' });
         const laterBucketHandle = bucketHandles[8];
         const sourceColumn = laterBucketHandle.closest('.bucket-column') as HTMLElement;
         const beforeOrder = Array.from(container.querySelectorAll('.bucket-column h2')).map((heading) => heading.textContent);
@@ -906,50 +1902,73 @@ describe('App integration', () => {
         expect(wrappers.every((wrapper) => wrapper.className === 'bucket-drop-slot-wrapper')).toBe(true);
     });
 
-    it('moves bucket 1 after bucket 9 when the pointer crosses bucket 9 midpoint', async () => {
-        localStorage.clear();
-        seedPlannerDataV2(overflowingBoardFixture);
-        const { container } = render(<App />);
-        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
-        const sourceHandle = bucketHandles[0];
-        const targetColumn = bucketHandles[8].closest('.bucket-column') as HTMLElement;
-        const dataTransfer = createDragDataTransfer();
-        mockBucketColumnGeometry(targetColumn);
+    it.each([
+        {
+            zoomPercent: 70,
+            visualColumnWidth: 140,
+            beforeMidpointX: 169,
+            afterMidpointX: 171,
+        },
+        {
+            zoomPercent: 110,
+            visualColumnWidth: 220,
+            beforeMidpointX: 209,
+            afterMidpointX: 211,
+        },
+    ] as const)(
+        'moves bucket 1 after bucket 9 using viewport midpoint coordinates at $zoomPercent% zoom',
+        async ({
+            zoomPercent,
+            visualColumnWidth,
+            beforeMidpointX,
+            afterMidpointX,
+        }) => {
+            localStorage.clear();
+            seedPlannerDataV2(overflowingBoardFixture);
+            localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, String(zoomPercent));
+            const { container } = render(<App />);
+            expect(container.querySelector('.board-stage')).toHaveClass(`board-zoom-${zoomPercent}`);
+            const bucketHandles = screen.getAllByRole('button', { name: 'Drag to move bucket' });
+            const sourceHandle = bucketHandles[0];
+            const targetColumn = bucketHandles[8].closest('.bucket-column') as HTMLElement;
+            const dataTransfer = createDragDataTransfer();
+            mockBucketColumnGeometry(targetColumn, 100, visualColumnWidth);
 
-        fireEvent.dragStart(sourceHandle, { dataTransfer });
-        await waitFor(() => expect(sourceHandle.closest('.bucket-column')).toHaveClass('bucket-drag-source'));
+            fireEvent.dragStart(sourceHandle, { dataTransfer });
+            await waitFor(() => expect(sourceHandle.closest('.bucket-column')).toHaveClass('bucket-drag-source'));
 
-        const slots = Array.from(container.querySelectorAll('.bucket-drop-slot')) as HTMLElement[];
-        fireBoardDragOver(targetColumn, 199, dataTransfer);
-        await waitFor(() => expect(slots[8]).toHaveClass('active'));
+            const slots = Array.from(container.querySelectorAll('.bucket-drop-slot')) as HTMLElement[];
+            fireBoardDragOver(targetColumn, beforeMidpointX, dataTransfer);
+            await waitFor(() => expect(slots[8]).toHaveClass('active'));
 
-        fireBoardDragOver(targetColumn, 201, dataTransfer);
-        await waitFor(() => {
-            expect(slots[8]).not.toHaveClass('active');
-            expect(slots[9]).toHaveClass('active');
-        });
+            fireBoardDragOver(targetColumn, afterMidpointX, dataTransfer);
+            await waitFor(() => {
+                expect(slots[8]).not.toHaveClass('active');
+                expect(slots[9]).toHaveClass('active');
+            });
 
-        fireBoardDrop(targetColumn, 201, dataTransfer);
-        await waitFor(() => {
-            expect(readRenderedBucketOrder(container)).toEqual([
-                'Bucket 2',
-                'Bucket 3',
-                'Bucket 4',
-                'Bucket 5',
-                'Bucket 6',
-                'Bucket 7',
-                'Bucket 8',
-                'Bucket 9',
-                'Bucket 1',
-            ]);
-        });
-    });
+            fireBoardDrop(targetColumn, afterMidpointX, dataTransfer);
+            await waitFor(() => {
+                expect(readRenderedBucketOrder(container)).toEqual([
+                    'Bucket 2',
+                    'Bucket 3',
+                    'Bucket 4',
+                    'Bucket 5',
+                    'Bucket 6',
+                    'Bucket 7',
+                    'Bucket 8',
+                    'Bucket 9',
+                    'Bucket 1',
+                ]);
+            });
+        },
+    );
 
     it('moves bucket 9 before bucket 2 using bucket 2 left-half target', async () => {
         localStorage.clear();
         seedPlannerDataV2(overflowingBoardFixture);
         const { container } = render(<App />);
-        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+        const bucketHandles = screen.getAllByRole('button', { name: 'Drag to move bucket' });
         const sourceHandle = bucketHandles[8];
         const targetColumn = bucketHandles[1].closest('.bucket-column') as HTMLElement;
         const dataTransfer = createDragDataTransfer();
@@ -984,7 +2003,7 @@ describe('App integration', () => {
         localStorage.clear();
         seedPlannerDataV2(overflowingBoardFixture);
         const { container } = render(<App />);
-        const bucketHandles = screen.getAllByRole('img', { name: 'Drag to move bucket' });
+        const bucketHandles = screen.getAllByRole('button', { name: 'Drag to move bucket' });
         const sourceHandle = bucketHandles[sourceIndex];
         const targetColumn = bucketHandles[4].closest('.bucket-column') as HTMLElement;
         const dataTransfer = createDragDataTransfer();
@@ -1015,7 +2034,7 @@ describe('App integration', () => {
         localStorage.clear();
         seedPlannerDataV2(overflowingBoardFixture);
         const { container } = render(<App />);
-        const sourceHandle = screen.getAllByRole('img', { name: 'Drag to move bucket' })[4];
+        const sourceHandle = screen.getAllByRole('button', { name: 'Drag to move bucket' })[4];
         const beforeOrder = readRenderedBucketOrder(container);
         const beforePersistedOrder = readRuntimePlannerData().buckets.map((bucket) => bucket.id);
         const dataTransfer = createDragDataTransfer();
@@ -1106,6 +2125,7 @@ describe('App integration', () => {
         seedPlannerDataV2();
 
         render(<App />);
+        expandSidebarSection('Projects');
 
         fireEvent.change(screen.getByLabelText('Active project'), {
             target: { value: 'project-a' },
@@ -1122,6 +2142,7 @@ describe('App integration', () => {
         render(<App />);
 
         fireEvent.click(screen.getByRole('button', { name: 'Open planner controls' }));
+        expandSidebarSection('Projects');
 
         const newProjectInput = screen.getByLabelText('New project name');
         fireEvent.change(newProjectInput, { target: { value: 'Roadmap' } });
@@ -1149,6 +2170,7 @@ describe('App integration', () => {
         seedPlannerDataV2();
 
         render(<App />);
+        expandSidebarSection('Projects');
 
         fireEvent.click(screen.getByRole('button', { name: 'Delete project' }));
         fireEvent.click(screen.getAllByRole('button', { name: 'Delete project' }).at(-1)!);
@@ -1177,10 +2199,13 @@ describe('App integration', () => {
         expect(screen.queryByRole('button', { name: 'Beta task' })).not.toBeInTheDocument();
     });
 
-    it('exports validated v2 JSON', async () => {
+    it('exports validated all-data v2 JSON with an exact, longer-lived dismissible filename notice', async () => {
         localStorage.clear();
         seedPlannerDataV2();
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-25T06:30:00.000Z'));
         let exportedBlob: Blob | null = null;
+        let downloadedFilename = '';
         const createObjectUrl = vi.fn((blob: Blob) => {
             exportedBlob = blob;
             return 'blob:planner-export';
@@ -1193,20 +2218,488 @@ describe('App integration', () => {
             value: vi.fn(),
             configurable: true,
         });
-        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+            this: HTMLAnchorElement,
+        ) {
+            downloadedFilename = this.download;
+        });
 
         render(<App />);
+        expandSidebarSection('Data');
 
         fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
 
         expect(screen.getByRole('status')).toHaveTextContent(
-            /Export started — check your default Downloads folder for bsp-planner-\d{4}-\d{2}-\d{2}\.json\./,
+            'Export started — check your default Downloads folder for bsp-planner-all-2026-07-25-063000.json.',
         );
+        expect(downloadedFilename).toBe('bsp-planner-all-2026-07-25-063000.json');
         expect(createObjectUrl).toHaveBeenCalledTimes(1);
         expect(exportedBlob).not.toBeNull();
         const exported = JSON.parse(await exportedBlob!.text()) as PlannerDataV2;
         expect(exported.version).toBe(2);
         expect(exported.projects).toHaveLength(2);
+
+        act(() => {
+            vi.advanceTimersByTime(5001);
+        });
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'bsp-planner-all-2026-07-25-063000.json',
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'Dismiss export notification' }));
+        expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+
+    it('exports the active project as a tagged, reference-closed envelope with one timestamped filename', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2ScopedExportFixture);
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-25T06:30:00.000Z'));
+        let exportedBlob: Blob | null = null;
+        let downloadedFilename = '';
+        Object.defineProperty(URL, 'createObjectURL', {
+            value: vi.fn((blob: Blob) => {
+                exportedBlob = blob;
+                return 'blob:planner-project-export';
+            }),
+            configurable: true,
+        });
+        Object.defineProperty(URL, 'revokeObjectURL', {
+            value: vi.fn(),
+            configurable: true,
+        });
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+            this: HTMLAnchorElement,
+        ) {
+            downloadedFilename = this.download;
+        });
+
+        render(<App />);
+        expandSidebarSection('Data');
+        fireEvent.click(screen.getByRole('button', { name: 'Choose export scope' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Project: Beta' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
+
+        expect(downloadedFilename).toBe('bsp-planner-project-beta-2026-07-25-063000.json');
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Export started — check your default Downloads folder for bsp-planner-project-beta-2026-07-25-063000.json.',
+        );
+        expect(exportedBlob).not.toBeNull();
+        const envelope = JSON.parse(await exportedBlob!.text()) as PlannerScopedExchangeEnvelope;
+        expect(isValidPlannerScopedExchangeEnvelope(envelope)).toBe(true);
+        expect(envelope).toMatchObject({
+            format: 'bsp-planner-scope',
+            envelopeVersion: 1,
+            scope: {
+                kind: 'project',
+                projectId: 'project-b',
+                projectName: 'Beta',
+            },
+            exportedAt: '2026-07-25T06:30:00.000Z',
+        });
+        expect(envelope.data.projects.map((project) => project.id)).toEqual(['project-b']);
+        expect(envelope.data.buckets.map((bucket) => bucket.id)).toEqual([
+            'bucket-beta-ready-linked',
+            'bucket-beta-manual',
+        ]);
+        expect(envelope.data.tasks.map((task) => task.id)).toEqual([
+            'task-beta-ready-1',
+            'task-beta-ready-2',
+            'task-beta-manual',
+        ]);
+        expect(envelope.data.templateDefinitions.map((definition) => definition.id)).toEqual([
+            'definition-launch-ready',
+        ]);
+        expect(envelope.data.templates.map((template) => template.id)).toEqual(['template-launch']);
+        expect(JSON.stringify(envelope)).not.toContain('project-a');
+        expect(JSON.stringify(envelope)).not.toContain('project-c');
+        expect(JSON.stringify(envelope)).not.toContain('template-support');
+    });
+
+    it('exports Unassigned as a tagged exchange envelope while preserving its filename', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-25T06:30:00.000Z'));
+        let exportedBlob: Blob | null = null;
+        let downloadedFilename = '';
+        Object.defineProperty(URL, 'createObjectURL', {
+            value: vi.fn((blob: Blob) => {
+                exportedBlob = blob;
+                return 'blob:planner-unassigned-export';
+            }),
+            configurable: true,
+        });
+        Object.defineProperty(URL, 'revokeObjectURL', {
+            value: vi.fn(),
+            configurable: true,
+        });
+        vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+            this: HTMLAnchorElement,
+        ) {
+            downloadedFilename = this.download;
+        });
+
+        render(<App />);
+        expandSidebarSection('Projects');
+        fireEvent.change(screen.getByLabelText('Active project'), {
+            target: { value: 'project-a' },
+        });
+        expandSidebarSection('Data');
+        fireEvent.click(screen.getByRole('button', { name: 'Choose export scope' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Unassigned tasks' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
+
+        expect(downloadedFilename).toBe(
+            'bsp-planner-unassigned-2026-07-25-063000.json',
+        );
+        expect(exportedBlob).not.toBeNull();
+        const envelope = JSON.parse(
+            await exportedBlob!.text(),
+        ) as PlannerScopedExchangeEnvelope;
+        expect(isValidPlannerScopedExchangeEnvelope(envelope)).toBe(true);
+        expect(envelope.scope).toEqual({
+            kind: 'unassigned',
+            projectId: 'project-a',
+            projectName: 'Alpha',
+        });
+        expect(envelope.data.buckets).toEqual([]);
+        expect(envelope.data.tasks.map((task) => task.id)).toEqual([
+            'task-alpha-unassigned',
+        ]);
+        expect(envelope.data.tasks.every((task) => task.bucketId === null)).toBe(true);
+    });
+
+    it('imports a tagged project export as a new remapped project only after an explicit destination choice', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const envelope = buildProjectExchangeEnvelope(
+            plannerV2Fixture,
+            'project-a',
+            '2026-07-25T06:30:00.000Z',
+        );
+
+        render(<App />);
+        expandSidebarSection('Data');
+        fireEvent.change(screen.getByLabelText('Import a project from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(envelope)], 'alpha-project.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+
+        const config = await screen.findByRole('group', { name: 'Configure project import' });
+        expect(within(config).getByText(/Source project:/)).toHaveTextContent(
+            'Source project: Alpha',
+        );
+        const confirmImport = within(config).getByRole('button', {
+            name: 'Confirm project import',
+        });
+        expect(confirmImport).toBeDisabled();
+
+        fireEvent.click(within(config).getByRole('radio', {
+            name: 'Create as new project',
+        }));
+        expect(confirmImport).toBeEnabled();
+        fireEvent.click(confirmImport);
+
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            const importedProject = saved.projects.find(
+                (project) => project.name === 'Alpha (imported)',
+            );
+            expect(importedProject).toBeDefined();
+            expect(saved.projects.map((project) => project.id)).toEqual(
+                expect.arrayContaining(['project-a', 'project-b']),
+            );
+            expect(
+                saved.tasks
+                    .filter((task) => task.projectId === importedProject?.id)
+                    .map((task) => task.title),
+            ).toEqual(['Alpha task', 'Alpha unassigned']);
+        });
+
+        expect(screen.getByRole('region', {
+            name: 'Alpha (imported) board viewport',
+        })).toBeInTheDocument();
+        expect(screen.getByText('Alpha task').closest('.task-card')).toHaveClass(
+            'uploaded-task-highlight',
+        );
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Imported "Alpha" into "Alpha (imported)"',
+        );
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'skipped 0 exact semantic duplicate task(s)',
+        );
+    });
+
+    it('requires an explicit source for raw multi-project imports and imports only that closure', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+
+        render(<App />);
+        expandSidebarSection('Data');
+        fireEvent.change(screen.getByLabelText('Import a project from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerV2Fixture)], 'all-projects.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+
+        const config = await screen.findByRole('group', { name: 'Configure project import' });
+        const sourceSelect = within(config).getByLabelText('Source project');
+        const confirmImport = within(config).getByRole('button', {
+            name: 'Confirm project import',
+        });
+        expect(sourceSelect).toHaveValue('');
+
+        fireEvent.click(within(config).getByRole('radio', {
+            name: 'Create as new project',
+        }));
+        expect(confirmImport).toBeDisabled();
+        fireEvent.change(sourceSelect, { target: { value: 'project-a' } });
+        expect(confirmImport).toBeEnabled();
+        fireEvent.click(confirmImport);
+
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            const importedProject = saved.projects.find(
+                (project) => project.name === 'Alpha (imported)',
+            );
+            expect(importedProject).toBeDefined();
+            const importedTitles = saved.tasks
+                .filter((task) => task.projectId === importedProject?.id)
+                .map((task) => task.title);
+            expect(importedTitles).toEqual(['Alpha task', 'Alpha unassigned']);
+            expect(importedTitles).not.toContain('Beta task');
+        });
+    });
+
+    it('merges into the explicitly selected existing project, activates it, and reports duplicates', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const envelope = buildProjectExchangeEnvelope(
+            plannerV2Fixture,
+            'project-b',
+            '2026-07-25T06:30:00.000Z',
+        );
+
+        render(<App />);
+        expandSidebarSection('Projects');
+        fireEvent.change(screen.getByLabelText('Active project'), {
+            target: { value: 'project-a' },
+        });
+        expect(screen.getByRole('region', {
+            name: 'Alpha board viewport',
+        })).toBeInTheDocument();
+
+        expandSidebarSection('Data');
+        fireEvent.change(screen.getByLabelText('Import a project from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(envelope)], 'beta-project.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+
+        const config = await screen.findByRole('group', { name: 'Configure project import' });
+        const confirmImport = within(config).getByRole('button', {
+            name: 'Confirm project import',
+        });
+        fireEvent.click(within(config).getByRole('radio', {
+            name: 'Merge into existing project',
+        }));
+        expect(confirmImport).toBeDisabled();
+        fireEvent.change(within(config).getByLabelText('Destination project'), {
+            target: { value: 'project-b' },
+        });
+        expect(confirmImport).toBeEnabled();
+        fireEvent.click(confirmImport);
+
+        await waitFor(() => {
+            const saved = readRuntimePlannerData();
+            expect(saved.projects).toHaveLength(2);
+            expect(saved.tasks.filter((task) => task.projectId === 'project-a')).toHaveLength(2);
+            expect(saved.tasks.filter((task) => task.projectId === 'project-b')).toHaveLength(1);
+        });
+        expect(screen.getByRole('region', {
+            name: 'Beta board viewport',
+        })).toBeInTheDocument();
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Imported "Beta" into "Beta"',
+        );
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'skipped 1 exact semantic duplicate task(s)',
+        );
+    });
+
+    it('routes scoped envelopes away from Restore while accepting validator-compatible raw backups', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const legacyProjectEnvelope = buildProjectExchangeEnvelope(
+            plannerV2Fixture,
+            'project-a',
+            '2026-07-25T06:30:00.000Z',
+        );
+        const scopedProjectEnvelope = buildPlannerScopedExchangeEnvelope(
+            plannerV2Fixture,
+            { kind: 'project', projectId: 'project-a' },
+            '2026-07-25T06:30:00.000Z',
+        );
+        const scopedBucketEnvelope = buildPlannerScopedExchangeEnvelope(
+            plannerV2Fixture,
+            {
+                kind: 'bucket',
+                projectId: 'project-a',
+                bucketId: 'bucket-alpha',
+            },
+            '2026-07-25T06:30:00.000Z',
+        );
+        const scopedUnassignedEnvelope = buildPlannerScopedExchangeEnvelope(
+            plannerV2Fixture,
+            { kind: 'unassigned', projectId: 'project-a' },
+            '2026-07-25T06:30:00.000Z',
+        );
+
+        render(<App />);
+        expandSidebarSection('Data');
+        const restoreInput = screen.getByLabelText('Restore planner data from JSON');
+
+        for (const [filename, payload] of [
+            ['project-scope.json', scopedProjectEnvelope],
+            ['bucket-scope.json', scopedBucketEnvelope],
+            ['unassigned-scope.json', scopedUnassignedEnvelope],
+            ['legacy-project.json', legacyProjectEnvelope],
+            [
+                'malformed-scope.json',
+                { ...scopedBucketEnvelope, envelopeVersion: 99 },
+            ],
+            [
+                'malformed-legacy-project.json',
+                { ...legacyProjectEnvelope, envelopeVersion: 99 },
+            ],
+        ] as const) {
+            fireEvent.change(restoreInput, {
+                target: {
+                    files: [
+                        new File([JSON.stringify(payload)], filename, {
+                            type: 'application/json',
+                        }),
+                    ],
+                },
+            });
+            await waitFor(() => {
+                expect(screen.getByRole('status')).toHaveTextContent(
+                    'Scoped exchange files cannot be restored. Use Import project JSON instead',
+                );
+            });
+            expect(screen.queryByRole('button', {
+                name: 'Confirm restore',
+            })).not.toBeInTheDocument();
+        }
+
+        const rawBackupWithLegacyMetadata = {
+            ...plannerV2Fixture,
+            scope: 'legacy metadata',
+            format: 'legacy-raw-backup',
+            envelopeVersion: 'legacy metadata',
+            sourceProject: 'legacy metadata',
+            data: 'legacy metadata',
+        };
+        fireEvent.change(restoreInput, {
+            target: {
+                files: [
+                    new File(
+                        [JSON.stringify(rawBackupWithLegacyMetadata)],
+                        'legacy-raw-v2.json',
+                        { type: 'application/json' },
+                    ),
+                ],
+            },
+        });
+        expect(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        })).toBeInTheDocument();
+        expect(readRuntimePlannerData()).toEqual(plannerV2Fixture);
+    });
+
+    it('clears stale pending Restore and import confirmations when a later file is unreadable', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const envelope = buildProjectExchangeEnvelope(
+            plannerV2Fixture,
+            'project-a',
+            '2026-07-25T06:30:00.000Z',
+        );
+
+        render(<App />);
+        expandSidebarSection('Data');
+
+        const restoreInput = screen.getByLabelText('Restore planner data from JSON');
+        fireEvent.change(restoreInput, {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerFixture)], 'valid-restore.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        expect(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        })).toBeInTheDocument();
+        fireEvent.change(restoreInput, {
+            target: {
+                files: [
+                    new File(['{'], 'invalid-restore.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        await waitFor(() => {
+            expect(screen.queryByRole('button', {
+                name: 'Confirm restore',
+            })).not.toBeInTheDocument();
+        });
+
+        const importInput = screen.getByLabelText('Import a project from JSON');
+        fireEvent.change(importInput, {
+            target: {
+                files: [
+                    new File([JSON.stringify(envelope)], 'valid-project.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        expect(await screen.findByRole('group', {
+            name: 'Configure project import',
+        })).toBeInTheDocument();
+        fireEvent.change(importInput, {
+            target: {
+                files: [
+                    new File(['{'], 'invalid-project.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        await waitFor(() => {
+            expect(screen.queryByRole('group', {
+                name: 'Configure project import',
+            })).not.toBeInTheDocument();
+        });
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Selected file could not be read as JSON.',
+        );
     });
 
     it('restores valid v1 JSON by migrating it into v2 state', async () => {
@@ -1214,6 +2707,7 @@ describe('App integration', () => {
         seedPlannerDataV2();
 
         render(<App />);
+        expandSidebarSection('Data');
 
         const file = new File([JSON.stringify(plannerFixture)], 'planner-v1.json', { type: 'application/json' });
         fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
@@ -1235,6 +2729,7 @@ describe('App integration', () => {
 
     it('restores valid v2 JSON directly', async () => {
         render(<App />);
+        expandSidebarSection('Data');
 
         const file = new File([JSON.stringify(plannerV2Fixture)], 'planner-v2.json', { type: 'application/json' });
         fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
@@ -1254,11 +2749,121 @@ describe('App integration', () => {
         });
     });
 
-    it('rejects malformed v2 restore and upload payloads with duplicate linked buckets', async () => {
+    it('persists a validated Restore recovery across remount and Undo restores the exact prior planner', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const { unmount } = render(<App />);
+        expandSidebarSection('Data');
+
+        fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerFixture)], 'replacement.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        fireEvent.click(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        }));
+
+        await waitFor(() => {
+            expect(localStorage.getItem(RESTORE_RECOVERY_STORAGE_KEY)).not.toBeNull();
+            expect(readRuntimePlannerData().projects).toHaveLength(1);
+        });
+
+        unmount();
+        render(<App />);
+        expandSidebarSection('Data');
+        fireEvent.click(screen.getByRole('button', { name: 'Undo restore' }));
+
+        await waitFor(() => {
+            expect(readRuntimePlannerData()).toEqual(plannerV2Fixture);
+            expect(localStorage.getItem(RESTORE_RECOVERY_STORAGE_KEY)).toBeNull();
+        });
+        expect(screen.queryByRole('button', {
+            name: 'Undo restore',
+        })).not.toBeInTheDocument();
+    });
+
+    it('aborts Restore without changing data when a recovery snapshot cannot be saved', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        const originalSetItem = window.localStorage.setItem.bind(window.localStorage);
+        vi.spyOn(window.localStorage, 'setItem').mockImplementation((key, value) => {
+            if (key === RESTORE_RECOVERY_STORAGE_KEY) {
+                throw new Error('synthetic storage failure');
+            }
+            originalSetItem(key, value);
+        });
+
+        render(<App />);
+        expandSidebarSection('Data');
+        fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerFixture)], 'replacement.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        fireEvent.click(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        }));
+
+        expect(screen.getByRole('status')).toHaveTextContent(
+            'Restore was not started because a recovery snapshot could not be saved locally.',
+        );
+        expect(screen.getByRole('button', {
+            name: 'Confirm restore',
+        })).toBeInTheDocument();
+        expect(readRuntimePlannerData()).toEqual(plannerV2Fixture);
+        expect(localStorage.getItem(RESTORE_RECOVERY_STORAGE_KEY)).toBeNull();
+    });
+
+    it('retires stale Restore recovery after a later planner edit', async () => {
+        localStorage.clear();
+        seedPlannerDataV2(plannerV2Fixture);
+        render(<App />);
+        expandSidebarSection('Data');
+
+        fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(plannerFixture)], 'replacement.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
+        });
+        fireEvent.click(await screen.findByRole('button', {
+            name: 'Confirm restore',
+        }));
+        expect(await screen.findByRole('button', {
+            name: 'Undo restore',
+        })).toBeInTheDocument();
+
+        fireEvent.click(screen.getByLabelText(
+            'Mark "Write launch summary" complete',
+        ));
+
+        await waitFor(() => {
+            expect(localStorage.getItem(RESTORE_RECOVERY_STORAGE_KEY)).toBeNull();
+            expect(screen.queryByRole('button', {
+                name: 'Undo restore',
+            })).not.toBeInTheDocument();
+        });
+        expect(readRuntimePlannerData().tasks[0].completed).toBe(true);
+    });
+
+    it('rejects malformed v2 Restore and project-import payloads with duplicate linked buckets', async () => {
         localStorage.clear();
         seedPlannerDataV2(plannerV2ScopedExportFixture);
 
         render(<App />);
+        expandSidebarSection('Data');
 
         const malformed: PlannerDataV2 = {
             ...plannerV2ScopedExportFixture,
@@ -1301,14 +2906,14 @@ describe('App integration', () => {
         });
         expect(screen.queryByRole('button', { name: 'Confirm restore' })).not.toBeInTheDocument();
 
-        fireEvent.change(screen.getByLabelText('Upload planner data from JSON'), {
+        fireEvent.change(screen.getByLabelText('Import a project from JSON'), {
             target: { files: [malformedFile] },
         });
 
         await waitFor(() => {
-            expect(screen.getByText(/not a valid/i)).toBeInTheDocument();
+            expect(screen.getByText(/not a valid|invalid/i)).toBeInTheDocument();
         });
-        expect(screen.queryByRole('button', { name: 'Confirm upload' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Confirm project import' })).not.toBeInTheDocument();
     });
 
     it('applies a template to the active project and supports undo and redo', async () => {
@@ -1316,6 +2921,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2TemplateFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         fireEvent.click(screen.getByRole('button', { name: 'Apply to Beta' }));
 
@@ -1349,6 +2955,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2TemplateFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         fireEvent.click(screen.getByRole('button', { name: 'Apply to Beta' }));
         await waitFor(() => {
@@ -1367,6 +2974,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2PartialTemplateFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         fireEvent.click(screen.getByRole('button', { name: 'Apply to Beta' }));
         await waitFor(() => {
@@ -1383,6 +2991,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2ZeroEligibleTemplateFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         const beforeApplySnapshot = localStorage.getItem(V2_STORAGE_KEY);
         const undoButton = screen.getByRole('button', { name: 'Undo' });
@@ -1398,7 +3007,7 @@ describe('App integration', () => {
         expect(screen.getByRole('button', { name: 'Undo' })).toBeDisabled();
     });
 
-    it('exports scoped template-derived bucket and restores it through UI as valid v2 data', async () => {
+    it('exports a tagged template-derived bucket, refuses Restore, and routes it to Project import', async () => {
         localStorage.clear();
         seedPlannerDataV2(plannerV2ScopedExportFixture);
         let exportedBlob: Blob | null = null;
@@ -1417,6 +3026,8 @@ describe('App integration', () => {
         vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
 
         render(<App />);
+        expandSidebarSection('Projects');
+        expandSidebarSection('Data');
 
         fireEvent.change(screen.getByLabelText('Active project'), {
             target: { value: 'project-b' },
@@ -1426,41 +3037,62 @@ describe('App integration', () => {
         fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
 
         expect(exportedBlob).not.toBeNull();
-        const exported = JSON.parse(await exportedBlob!.text()) as PlannerDataV2;
+        const exported = JSON.parse(
+            await exportedBlob!.text(),
+        ) as PlannerScopedExchangeEnvelope;
 
-        expect(exported.projects.map((project) => project.id)).toEqual(['project-b']);
-        expect(exported.buckets.map((bucket) => bucket.id)).toEqual(['bucket-beta-ready-linked']);
-        expect(exported.tasks.map((task) => task.id).sort()).toEqual(['task-beta-ready-1', 'task-beta-ready-2']);
-        expect(exported.templateDefinitions.map((definition) => definition.id)).toEqual(['definition-launch-ready']);
-        expect(exported.templates.map((template) => template.id)).toEqual(['template-launch']);
+        expect(isValidPlannerScopedExchangeEnvelope(exported)).toBe(true);
+        expect(exported.scope).toEqual({
+            kind: 'bucket',
+            projectId: 'project-b',
+            projectName: 'Beta',
+            bucketId: 'bucket-beta-ready-linked',
+            bucketName: 'Beta Ready Lane',
+        });
+        expect(exported.data.projects.map((project) => project.id)).toEqual(['project-b']);
+        expect(exported.data.buckets.map((bucket) => bucket.id)).toEqual(['bucket-beta-ready-linked']);
+        expect(exported.data.tasks.map((task) => task.id).sort()).toEqual(['task-beta-ready-1', 'task-beta-ready-2']);
+        expect(exported.data.templateDefinitions.map((definition) => definition.id)).toEqual(['definition-launch-ready']);
+        expect(exported.data.templates.map((template) => template.id)).toEqual(['template-launch']);
 
-        expect(exported.projects.some((project) => project.id === 'project-a')).toBe(false);
-        expect(exported.projects.some((project) => project.id === 'project-c')).toBe(false);
-        expect(exported.buckets.some((bucket) => bucket.id === 'bucket-beta-manual')).toBe(false);
-        expect(exported.tasks.some((task) => task.id === 'task-beta-manual')).toBe(false);
-        expect(exported.templates.some((template) => template.id === 'template-support')).toBe(false);
-        expect(exported.templateDefinitions.some((definition) => definition.id === 'definition-support-triage')).toBe(false);
-
-        expect(isValidPlannerDataV2(exported)).toBe(true);
+        expect(exported.data.projects.some((project) => project.id === 'project-a')).toBe(false);
+        expect(exported.data.projects.some((project) => project.id === 'project-c')).toBe(false);
+        expect(exported.data.buckets.some((bucket) => bucket.id === 'bucket-beta-manual')).toBe(false);
+        expect(exported.data.tasks.some((task) => task.id === 'task-beta-manual')).toBe(false);
+        expect(exported.data.templates.some((template) => template.id === 'template-support')).toBe(false);
+        expect(exported.data.templateDefinitions.some((definition) => definition.id === 'definition-support-triage')).toBe(false);
 
         const restoreFile = new File([JSON.stringify(exported)], 'scoped-export.json', { type: 'application/json' });
         fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
             target: { files: [restoreFile] },
         });
         await waitFor(() => {
-            expect(screen.getByText('Restore 2 task(s) and 1 bucket(s) and replace current planner?')).toBeInTheDocument();
+            expect(screen.getByText(
+                /Scoped exchange files cannot be restored/,
+            )).toHaveTextContent(
+                'Scoped exchange files cannot be restored. Use Import project JSON instead',
+            );
         });
-        fireEvent.click(screen.getByRole('button', { name: 'Confirm restore' }));
+        expect(screen.queryByRole('button', { name: 'Confirm restore' })).not.toBeInTheDocument();
+        expect(readRuntimePlannerData()).toEqual(plannerV2ScopedExportFixture);
+        expect(localStorage.getItem(RESTORE_RECOVERY_STORAGE_KEY)).toBeNull();
 
-        await waitFor(() => {
-            const restored = readRuntimePlannerData();
-            expect(isValidPlannerDataV2(restored)).toBe(true);
-            expect(restored.projects.map((project) => project.id)).toEqual(['project-b']);
-            expect(restored.buckets.map((bucket) => bucket.id)).toEqual(['bucket-beta-ready-linked']);
-            expect(restored.tasks.map((task) => task.id).sort()).toEqual(['task-beta-ready-1', 'task-beta-ready-2']);
-            expect(restored.templateDefinitions.map((definition) => definition.id)).toEqual(['definition-launch-ready']);
-            expect(restored.templates.map((template) => template.id)).toEqual(['template-launch']);
+        fireEvent.change(screen.getByLabelText('Import a project from JSON'), {
+            target: {
+                files: [
+                    new File([JSON.stringify(exported)], 'scoped-export.json', {
+                        type: 'application/json',
+                    }),
+                ],
+            },
         });
+        const config = await screen.findByRole('group', {
+            name: 'Configure project import',
+        });
+        expect(within(config).getByText('Scoped exchange export ready to import.')).toBeInTheDocument();
+        expect(within(config).getByText(/Source project:/)).toHaveTextContent(
+            'Source project: Beta',
+        );
     });
 
     it('syncs definition rename through persistence and undo/redo', async () => {
@@ -1468,6 +3100,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2TemplateFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         const definitionInput = screen.getByTestId('template-definition-name-definition-ready');
         fireEvent.change(definitionInput, { target: { value: 'Ready Renamed' } });
@@ -1500,6 +3133,7 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2ScopedExportFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
 
         const templateSelect = screen.getByLabelText('Selected template');
         fireEvent.change(templateSelect, { target: { value: 'template-launch' } });
@@ -1522,6 +3156,8 @@ describe('App integration', () => {
         seedPlannerDataV2(plannerV2ScopedExportFixture);
 
         render(<App />);
+        expandSidebarSection('Templates');
+        expandSidebarSection('Data');
 
         const draftInput = screen.getByTestId('template-definition-name-definition-launch-ready');
         fireEvent.change(draftInput, { target: { value: 'Unsaved Draft Name' } });
@@ -1553,6 +3189,7 @@ describe('App integration', () => {
 
     it('creates and edits templates and definitions from the Template Library', async () => {
         render(<App />);
+        expandSidebarSection('Templates');
 
         fireEvent.change(screen.getByLabelText('New template name'), { target: { value: 'Ops Template' } });
         fireEvent.keyDown(screen.getByLabelText('New template name'), { key: 'Enter' });
@@ -1594,13 +3231,14 @@ describe('App integration', () => {
         vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
 
         render(<App />);
+        expandSidebarSection('Data');
 
         fireEvent.click(screen.getByRole('button', { name: 'Export JSON' }));
         const exported = JSON.parse(await exportedBlob!.text()) as PlannerDataV2;
         expect(exported.templates.map((template) => template.id)).toEqual(['template-launch']);
         expect(exported.templateDefinitions.map((definition) => definition.id)).toEqual(['definition-ready', 'definition-done']);
 
-        const restoreFile = new File([JSON.stringify(plannerV2TemplateFixture)], 'templates.json', { type: 'application/json' });
+        const restoreFile = new File([JSON.stringify(exported)], 'templates.json', { type: 'application/json' });
         fireEvent.change(screen.getByLabelText('Restore planner data from JSON'), {
             target: { files: [restoreFile] },
         });

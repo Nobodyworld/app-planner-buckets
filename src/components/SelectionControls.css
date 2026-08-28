@@ -1,0 +1,118 @@
+.selection-checkbox-control {
+  position: relative;
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  place-items: center;
+  cursor: pointer;
+}
+
+.selection-checkbox-control input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.selection-checkbox-indicator {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 2px solid color-mix(in oklab, var(--border) 76%, var(--muted) 24%);
+  border-radius: 5px;
+  color: #fff;
+  background: var(--surface);
+  transition:
+    border-color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard),
+    box-shadow var(--motion-fast) var(--ease-standard);
+}
+
+.bucket-header .selection-checkbox-indicator {
+  color: #fff;
+  font-size: inherit;
+}
+
+.bucket-header > .bucket-selection-control {
+  margin-top: 1px;
+}
+
+.selection-checkbox-control input:checked + .selection-checkbox-indicator,
+.selection-checkbox-control input:indeterminate + .selection-checkbox-indicator {
+  border-color: var(--primary-strong);
+  background: var(--primary);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, white 30%, transparent);
+}
+
+.selection-checkbox-control input:checked + .selection-checkbox-indicator::after {
+  content: "✓";
+  font-size: 0.78rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.selection-checkbox-control input:indeterminate + .selection-checkbox-indicator::after {
+  content: "−";
+  font-size: 0.9rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.selection-checkbox-control input:focus-visible + .selection-checkbox-indicator {
+  outline: 3px solid color-mix(in oklab, var(--primary) 30%, transparent);
+  outline-offset: 2px;
+}
+
+.selection-checkbox-control input:disabled {
+  cursor: not-allowed;
+}
+
+.selection-checkbox-control input:disabled + .selection-checkbox-indicator {
+  opacity: 0.45;
+}
+
+.selection-actions-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.selection-count {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.selection-actions-row .secondary-button {
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 0.76rem;
+}
+
+.bucket-pin-button .bucket-pin-icon {
+  display: inline-grid;
+  place-items: center;
+  transition:
+    filter var(--motion-fast) var(--ease-standard),
+    opacity var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+
+.bucket-pin-button.is-unpinned .bucket-pin-icon {
+  filter: grayscale(1);
+  opacity: 0.42;
+  transform: scale(0.92);
+}
+
+.bucket-pin-button.is-pinned .bucket-pin-icon {
+  filter: none;
+  opacity: 1;
+  transform: scale(1);
+}
