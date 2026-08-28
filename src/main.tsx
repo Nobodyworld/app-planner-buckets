@@ -31,6 +31,7 @@ const startPlanner = async (): Promise<void> => {
       runtime.adapter,
       runtime.data,
       runtime.warning,
+      Boolean(runtime.restoreRecovery),
     );
     root.render(
       <StrictMode>
