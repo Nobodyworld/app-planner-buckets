@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
 import { installBoardScrollChaining } from './services/boardScrollChaining';
+import { saveRestoreRecoverySnapshot } from './services/restoreRecovery';
 import { registerPlannerStorageRuntimeBridge } from './storage/plannerStorageBridge';
 import { bootstrapPlannerStorageRuntime } from './storage/plannerStorageBootstrap';
 import './styles.css';
@@ -15,6 +16,17 @@ const root = createRoot(document.getElementById('root')!);
 const startPlanner = async (): Promise<void> => {
   try {
     const runtime = await bootstrapPlannerStorageRuntime();
+    if (
+      runtime.adapter.mode === 'desktop-file'
+      && runtime.restoreRecovery
+    ) {
+      saveRestoreRecoverySnapshot(
+        localStorage,
+        runtime.restoreRecovery,
+        runtime.data,
+        new Date().toISOString(),
+      );
+    }
     registerPlannerStorageRuntimeBridge(
       runtime.adapter,
       runtime.data,
