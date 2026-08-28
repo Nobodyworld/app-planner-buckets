@@ -1,12 +1,20 @@
 import type { PlannerDataV2 } from '../types/v2';
 
-interface RuntimeSaveStatus {
+export interface RuntimeStorageStatus {
+  mode?: 'browser-local-storage' | 'desktop-file';
   writable: boolean;
+  phase?: 'idle' | 'saving' | 'saved' | 'error' | 'read-only';
+  dataPath?: string | null;
+  backupPath?: string | null;
+  lastSavedAt?: string | null;
+  warning?: string | null;
+  error?: string | null;
 }
 
-interface RuntimeSaveTarget {
+export interface RuntimeSaveTarget {
   mode: 'browser-local-storage' | 'desktop-file';
-  getStatus: () => RuntimeSaveStatus;
+  getStatus: () => RuntimeStorageStatus;
+  subscribe?: (listener: (status: RuntimeStorageStatus) => void) => () => void;
   save: (data: PlannerDataV2) => Promise<unknown>;
 }
 
@@ -32,6 +40,8 @@ export const getPlannerStorageRuntimeBootstrap = (): RuntimeBootstrapSeed | null
     ? { data: bootstrapSeed.data, warning: bootstrapSeed.warning }
     : null
 );
+
+export const getPlannerStorageRuntimeTarget = (): RuntimeSaveTarget | null => saveTarget;
 
 /**
  * Returns true when a desktop runtime accepted responsibility for this save.
