@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent as ReactDragEvent, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
 import { BucketColumn } from './components/BucketColumn';
 import { ProjectBoard } from './components/ProjectBoard';
+import { PasteUndoNotice } from './components/PasteUndoNotice';
+import { SelectionActions } from './components/SelectionControls';
 import { TaskEditor } from './components/TaskEditor';
 import { PlannerSidepanel } from './components/sidepanel/PlannerSidepanel';
 import { getGlobalBucketView } from './selectors/globalBucketView';
@@ -9,17 +11,55 @@ import type { TaskDraft } from './types';
 import type { BucketTemplate, BucketTemplateDefinition, BucketV2 as Bucket, PlannerDataV2 as PlannerData, PlannerTaskV2 as PlannerTask, Project } from './types/v2';
 import { usePlannerHistory } from './hooks/usePlannerHistory';
 import { usePlannerKeyboardShortcuts } from './hooks/usePlannerKeyboardShortcuts';
+import {
+  BOARD_ZOOM_PERCENTAGES,
+  loadBoardZoomPreference,
+  saveBoardZoomPreference,
+  stepBoardZoom,
+} from './services/boardZoom';
+import { resolveQuickAdd } from './services/quickAdd';
+import {
+  getBucketTaskSelectionState,
+  getSelectedTaskCount,
+  getSelectedTasksInVisibleOrder,
+  pruneTaskSelection,
+  setVisibleBucketTaskSelection,
+  toggleTaskSelection,
+} from './services/plannerSelection';
 import { savePlannerDataV2ToLocalStorage, loadPlannerDataV2FromLocalStorage } from './services/plannerPersistence';
 import { plannerReducerV2, type PlannerActionV2 } from './state/plannerReducerV2';
 import {
   copyTextToClipboard,
-  formatBucketForOrderedCopy,
   formatTaskChecklistLabel,
   formatTaskForOrderedCopy,
   formatTaskForSingleCopy,
 } from './services/plannerClipboard';
-import { coercePlannerDataToV2, mergeUploadedPlannerDataV2 } from './services/plannerImport';
-import { isValidPlannerDataV2 } from './types/validators';
+import { coercePlannerDataToV2 } from './services/plannerImport';
+import {
+  buildStructuredBucketCopyDocument,
+  formatProjectMarkdownForCopy,
+  type StructuredBucketCopyTask,
+} from './services/plannerExchange';
+import {
+  buildPlannerExportFilename,
+  buildPlannerScopedExchangeEnvelope,
+  buildRawPlannerDataExport,
+  isValidPlannerScopedExchangeEnvelope,
+  isValidProjectExchangeEnvelope,
+  type PlannerExportFilenameScope,
+} from './services/plannerExport';
+import {
+  importPlannerProject,
+  isProjectExchangeEnvelopeCandidate,
+  parsePlannerProjectImport,
+  type ParsedPlannerProjectImport,
+  type PlannerProjectImportSummary,
+} from './services/plannerProjectImport';
+import {
+  clearRestoreRecoverySnapshot,
+  loadRestoreRecoverySnapshot,
+  saveRestoreRecoverySnapshot,
+} from './services/restoreRecovery';
 
 const accentIndexFromBucket = (bucketId: string | null) => {
   if (!bucketId) return 0;
@@ -48,18 +88,76 @@ const ensureScrollableTargetInView = (
 };
 
 const UPLOAD_HALO_DURATION_MS = 120000;
+const EXPORT_NOTICE_DURATION_MS = 10000;
+const PASTE_UNDO_DURATION_MS = 10000;
 const DROP_SETTLE_DURATION_MS = 1500;
-const QUICK_TASK_BUCKET_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9 _-]*$/;
 const BOARD_EDGE_AUTOSCROLL_ZONE_PX = 96;
 const BOARD_EDGE_AUTOSCROLL_MAX_SPEED_PX = 24;
 
-const normalizeBucketName = (name: string) => name.trim().toLowerCase();
+interface PasteUndoState {
+  projectId: string;
+  taskIds: string[];
+  destinationName: string;
+}
+
+const formatProjectImportSummary = (
+  summary: PlannerProjectImportSummary,
+  sourceProjectName: string,
+  destinationProjectName: string,
+): string => {
+  const destinationSummary = summary.projectCreatedCount > 0
+    ? 'created 1 project'
+    : 'merged into 1 existing project';
+  const ambiguitySummary = (
+    summary.templateAmbiguousMatchCount
+    + summary.templateDefinitionAmbiguousMatchCount
+    + summary.bucketAmbiguousMatchCount
+  );
+
+  return [
+    `Imported "${sourceProjectName}" into "${destinationProjectName}"`,
+    destinationSummary,
+    `created ${summary.bucketCreatedCount} bucket(s)`,
+    `reused ${summary.bucketReusedCount} bucket(s)`,
+    `created ${summary.taskCreatedCount} task(s)`,
+    `skipped ${summary.taskSkippedDuplicateCount} exact semantic duplicate task(s)`,
+    `created ${summary.dependencyCreatedCount} template record(s)`,
+    `reused ${summary.dependencyReusedCount} template record(s)`,
+    `resolved ${ambiguitySummary} ambiguous/conflicting match(es) by creating new records`,
+  ].join('; ') + '.';
+};
+
+const normalizeQuickAddName = (name: string) => name.trim().toLocaleLowerCase();
 
 const now = (): string => new Date().toISOString();
 
 const selectInitialProjectId = (projects: Project[]): string => (
   projects.find((project) => project.pinned)?.id ?? projects[0]?.id ?? ''
 );
+
+const buildProjectChoiceOptions = (
+  projects: readonly Project[],
+): Array<{ projectId: string; label: string }> => {
+  const counts = new Map<string, number>();
+  projects.forEach((project) => {
+    const label = project.name.trim() || 'Untitled project';
+    const key = label.toLocaleLowerCase();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  });
+
+  const ordinals = new Map<string, number>();
+  return projects.map((project) => {
+    const baseLabel = project.name.trim() || 'Untitled project';
+    const key = baseLabel.toLocaleLowerCase();
+    const count = counts.get(key) ?? 1;
+    const ordinal = (ordinals.get(key) ?? 0) + 1;
+    ordinals.set(key, ordinal);
+    return {
+      projectId: project.id,
+      label: count > 1 ? `${baseLabel} (${ordinal} of ${count})` : baseLabel,
+    };
+  });
+};
 
 const selectNearestProjectIdAfterDeletion = (projects: Project[], deletedProjectId: string): string => {
   const sourceIndex = projects.findIndex((project) => project.id === deletedProjectId);
@@ -208,11 +306,8 @@ interface RenameDialogState {
 
 type ThemeMode = 'light' | 'dark';
 type VisualMode = 'calm' | 'balanced' | 'energetic';
-const BOARD_ZOOM_STORAGE_KEY = 'planner-buckets:board-zoom-index';
 const THEME_STORAGE_KEY = 'planner-buckets:theme';
 const VISUAL_MODE_STORAGE_KEY = 'planner-buckets:visual-mode';
-const MIN_BOARD_ZOOM_INDEX = 0;
-const MAX_BOARD_ZOOM_INDEX = 4;
 const APP_NAME = 'Planner Buckets';
 const APP_BANNER = 'Local-First Task Planning';
 const APP_ICON_TEXT = 'PB';
@@ -220,11 +315,13 @@ const APP_ICON_TEXT = 'PB';
 export default function App() {
   const openAdvancedSectionsInTests = /jsdom/i.test(window.navigator.userAgent);
   const [initialLoadResult] = useState(() => loadPlannerDataV2FromLocalStorage());
+  const initialProjectId = selectInitialProjectId(initialLoadResult.data.projects);
+  const initialProjectName = initialLoadResult.data.projects.find((project) => project.id === initialProjectId)?.name ?? '';
   const { state, dispatch: dispatchPlanner, canUndo, canRedo, undo, redo } = usePlannerHistory<PlannerData, PlannerActionV2>(
     initialLoadResult.data,
     plannerReducerV2,
   );
-  const [activeProjectId, setActiveProjectId] = useState(() => selectInitialProjectId(initialLoadResult.data.projects));
+  const [activeProjectId, setActiveProjectId] = useState(initialProjectId);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(() => initialLoadResult.data.templates[0]?.id ?? null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [bucketName, setBucketName] = useState('');
@@ -238,18 +335,25 @@ export default function App() {
   const [renameDialog, setRenameDialog] = useState<RenameDialogState | null>(null);
   const [renameDialogError, setRenameDialogError] = useState<string | null>(null);
   const [pendingRestoreData, setPendingRestoreData] = useState<PlannerData | null>(null);
-  const [pendingUploadData, setPendingUploadData] = useState<PlannerData | null>(null);
-  const [lastRestoreBackup, setLastRestoreBackup] = useState<PlannerData | null>(null);
+  const [pendingProjectImport, setPendingProjectImport] = useState<ParsedPlannerProjectImport | null>(null);
+  const [selectedProjectImportSourceId, setSelectedProjectImportSourceId] = useState('');
+  const [projectImportDestinationKind, setProjectImportDestinationKind] = useState<'new' | 'existing' | null>(null);
+  const [selectedProjectImportDestinationId, setSelectedProjectImportDestinationId] = useState('');
+  const [lastRestoreBackup, setLastRestoreBackup] = useState<PlannerData | null>(() => (
+    loadRestoreRecoverySnapshot(localStorage, initialLoadResult.data)?.previousData ?? null
+  ));
   const [pendingBucketWarp, setPendingBucketWarp] = useState(false);
   const [highlightedBucketId, setHighlightedBucketId] = useState<string | null>(null);
   const [highlightedTaskId, setHighlightedTaskId] = useState<string | null>(null);
   const [highlightedTaskBucketId, setHighlightedTaskBucketId] = useState<string | null>(null);
   const [uploadedTaskIds, setUploadedTaskIds] = useState<string[]>([]);
   const [pendingTaskSurge, setPendingTaskSurge] = useState(false);
-  const [quickTaskOpen, setQuickTaskOpen] = useState(true);
   const [quickTaskTitle, setQuickTaskTitle] = useState('');
+  const [quickTaskProjectName, setQuickTaskProjectName] = useState(initialProjectName);
+  const [quickTaskProjectId, setQuickTaskProjectId] = useState<string | null>(initialProjectId || null);
   const [quickTaskBucketName, setQuickTaskBucketName] = useState('');
   const [quickTaskBucketId, setQuickTaskBucketId] = useState<string | null>(null);
+  const [quickTaskMessage, setQuickTaskMessage] = useState<string | null>(null);
   const [boardBucketAddOpen, setBoardBucketAddOpen] = useState(false);
   const [boardBucketNameDraft, setBoardBucketNameDraft] = useState('');
   const [hideRestoreUndoCard, setHideRestoreUndoCard] = useState(false);
@@ -270,21 +374,15 @@ export default function App() {
     }
     return 'balanced';
   });
-  const [boardZoomIndex, setBoardZoomIndex] = useState(() => {
-    const stored = Number(localStorage.getItem(BOARD_ZOOM_STORAGE_KEY));
-    if (Number.isInteger(stored) && stored >= MIN_BOARD_ZOOM_INDEX && stored <= MAX_BOARD_ZOOM_INDEX) {
-      return stored;
-    }
-    return 3;
-  });
+  const [boardZoomPercent, setBoardZoomPercent] = useState(() => loadBoardZoomPreference());
   const [isSidepanelOpen, setIsSidepanelOpen] = useState(false);
   const [isSidepanelLocked, setIsSidepanelLocked] = useState(false);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
   const [draggedTaskIds, setDraggedTaskIds] = useState<string[]>([]);
-  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
-  const [selectionAnchorTaskId, setSelectionAnchorTaskId] = useState<string | null>(null);
-  const [taskClipboard, setTaskClipboard] = useState<Array<Pick<PlannerTask, 'title' | 'description'>>>([]);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(() => new Set());
+  const [taskClipboard, setTaskClipboard] = useState<StructuredBucketCopyTask[]>([]);
   const [activePasteBucketId, setActivePasteBucketId] = useState<string | null>(null);
+  const [latestPasteUndo, setLatestPasteUndo] = useState<PasteUndoState | null>(null);
   const [draggedBucketId, setDraggedBucketId] = useState<string | null>(null);
   const [activeBucketDropIndex, setActiveBucketDropIndex] = useState<number | null>(null);
   const [settledBucketDropIndex, setSettledBucketDropIndex] = useState<number | null>(null);
@@ -292,9 +390,10 @@ export default function App() {
   const [settledBucketFrom, setSettledBucketFrom] = useState<'left' | 'right' | null>(null);
   const [status, setStatus] = useState('Saved locally');
   const restoreInputRef = useRef<HTMLInputElement>(null);
-  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const projectImportInputRef = useRef<HTMLInputElement>(null);
   const quickTaskInputRef = useRef<HTMLInputElement>(null);
   const quickTaskBucketInputRef = useRef<HTMLInputElement>(null);
+  const quickTaskProjectInputRef = useRef<HTMLInputElement>(null);
   const quickTaskShellRef = useRef<HTMLDivElement>(null);
   const boardBucketInputRef = useRef<HTMLInputElement>(null);
   const sidepanelRef = useRef<HTMLElement>(null);
@@ -306,9 +405,13 @@ export default function App() {
   const boardAutoscrollFrameRef = useRef<number | null>(null);
   const bucketElementRefs = useRef<Record<string, HTMLElement | null>>({});
   const restoreConfirmRef = useRef<HTMLDivElement>(null);
-  const uploadConfirmRef = useRef<HTMLDivElement>(null);
+  const projectImportConfirmRef = useRef<HTMLDivElement>(null);
   const exportScopeMenuRef = useRef<HTMLDivElement>(null);
   const restoreUndoCloseTimeoutRef = useRef<number | null>(null);
+  const pasteUndoTimeoutRef = useRef<number | null>(null);
+  const restoreFileReadSequenceRef = useRef(0);
+  const projectImportFileReadSequenceRef = useRef(0);
+  const previousActiveProjectIdRef = useRef(initialProjectId);
   const bucketHighlightTimeoutRef = useRef<number | null>(null);
   const taskSurgeTimeoutRef = useRef<number | null>(null);
   const uploadHaloTimeoutRef = useRef<number | null>(null);
@@ -319,6 +422,13 @@ export default function App() {
   const sidepanelHoveringRef = useRef(false);
   const sidepanelToggleHoveringRef = useRef(false);
   const sidepanelLockHoveringRef = useRef(false);
+  const clearLatestPasteUndo = () => {
+    if (pasteUndoTimeoutRef.current !== null) {
+      window.clearTimeout(pasteUndoTimeoutRef.current);
+      pasteUndoTimeoutRef.current = null;
+    }
+    setLatestPasteUndo(null);
+  };
   const sidepanelToggleLabel = isSidepanelOpen ? 'Hide controls' : 'Show controls';
   const sidepanelToggleIcon = isSidepanelOpen ? '▴' : '▾';
   const sidepanelLockIcon = isSidepanelLocked ? '🔒' : '🔓';
@@ -367,6 +477,33 @@ export default function App() {
     () => state.buckets.filter((bucket) => bucket.projectId === effectiveActiveProjectId),
     [effectiveActiveProjectId, state.buckets],
   );
+  const quickTaskTargetProjectId = useMemo(() => {
+    if (
+      quickTaskProjectId
+      && state.projects.some((project) => project.id === quickTaskProjectId)
+    ) {
+      return quickTaskProjectId;
+    }
+
+    const normalizedProjectName = normalizeQuickAddName(quickTaskProjectName);
+    if (!normalizedProjectName) return effectiveActiveProjectId || null;
+
+    const matchingProjects = state.projects.filter(
+      (project) => normalizeQuickAddName(project.name) === normalizedProjectName,
+    );
+    return matchingProjects.length === 1 ? matchingProjects[0].id : null;
+  }, [
+    effectiveActiveProjectId,
+    quickTaskProjectId,
+    quickTaskProjectName,
+    state.projects,
+  ]);
+  const quickTaskProjectBuckets = useMemo(
+    () => quickTaskTargetProjectId
+      ? state.buckets.filter((bucket) => bucket.projectId === quickTaskTargetProjectId)
+      : [],
+    [quickTaskTargetProjectId, state.buckets],
+  );
   const activeTasks = useMemo(
     () => state.tasks.filter((task) => task.projectId === effectiveActiveProjectId),
     [effectiveActiveProjectId, state.tasks],
@@ -379,9 +516,54 @@ export default function App() {
   }, [activeProjectId, state.projects]);
 
   useEffect(() => {
+    if (previousActiveProjectIdRef.current === effectiveActiveProjectId) return;
+    previousActiveProjectIdRef.current = effectiveActiveProjectId;
+    clearLatestPasteUndo();
+  }, [effectiveActiveProjectId]);
+
+  useEffect(() => {
+    if (!latestPasteUndo) return;
+    const hasRemainingPastedTask = state.tasks.some((task) => (
+      task.projectId === latestPasteUndo.projectId
+      && latestPasteUndo.taskIds.includes(task.id)
+    ));
+    if (!hasRemainingPastedTask) {
+      clearLatestPasteUndo();
+    }
+  }, [latestPasteUndo, state.tasks]);
+
+  useEffect(() => {
+    if (!quickTaskProjectId) return;
+    const selectedProject = state.projects.find((project) => project.id === quickTaskProjectId);
+    if (!selectedProject) {
+      setQuickTaskProjectId(null);
+      setQuickTaskBucketId(null);
+      return;
+    }
+    setQuickTaskProjectName(selectedProject.name);
+  }, [quickTaskProjectId, state.projects]);
+
+  useEffect(() => {
     if (selectedTemplateId && state.templates.some((template) => template.id === selectedTemplateId)) return;
     setSelectedTemplateId(state.templates[0]?.id ?? null);
   }, [selectedTemplateId, state.templates]);
+
+  useEffect(() => {
+    if (
+      projectImportDestinationKind !== 'existing'
+      || !selectedProjectImportDestinationId
+      || state.projects.some(
+        (project) => project.id === selectedProjectImportDestinationId,
+      )
+    ) {
+      return;
+    }
+    setSelectedProjectImportDestinationId('');
+  }, [
+    projectImportDestinationKind,
+    selectedProjectImportDestinationId,
+    state.projects,
+  ]);
 
   useEffect(() => {
     try {
@@ -393,11 +575,20 @@ export default function App() {
   }, [state]);
 
   useEffect(() => {
+    if (!lastRestoreBackup) return;
+    const recoverySnapshot = loadRestoreRecoverySnapshot(localStorage, state);
+    if (recoverySnapshot) return;
+    setLastRestoreBackup(null);
+    setHideRestoreUndoCard(false);
+    setIsRestoreUndoClosing(false);
+  }, [lastRestoreBackup, state]);
+
+  useEffect(() => {
     if (!exportNotice) return;
 
     const timeoutId = window.setTimeout(() => {
       setExportNotice(null);
-    }, 5000);
+    }, EXPORT_NOTICE_DURATION_MS);
 
     return () => window.clearTimeout(timeoutId);
   }, [exportNotice]);
@@ -413,8 +604,8 @@ export default function App() {
   }, [visualMode]);
 
   useEffect(() => {
-    localStorage.setItem(BOARD_ZOOM_STORAGE_KEY, String(boardZoomIndex));
-  }, [boardZoomIndex]);
+    saveBoardZoomPreference(boardZoomPercent);
+  }, [boardZoomPercent]);
 
   useEffect(() => {
     return () => {
@@ -423,6 +614,9 @@ export default function App() {
       }
       if (restoreUndoCloseTimeoutRef.current !== null) {
         window.clearTimeout(restoreUndoCloseTimeoutRef.current);
+      }
+      if (pasteUndoTimeoutRef.current !== null) {
+        window.clearTimeout(pasteUndoTimeoutRef.current);
       }
       if (bucketHighlightTimeoutRef.current !== null) {
         window.clearTimeout(bucketHighlightTimeoutRef.current);
@@ -504,37 +698,26 @@ export default function App() {
     return filtered;
   }, [tasksByBucket, searchQuery, showCompleted]);
 
-  const selectedTaskIdSet = useMemo(() => new Set(selectedTaskIds), [selectedTaskIds]);
-
-  const orderedVisibleTaskIds = useMemo(() => {
-    const ordered: string[] = [];
-    (filteredTasksByBucket.get(null) ?? []).forEach((task) => ordered.push(task.id));
+  const orderedVisibleTasks = useMemo(() => {
+    const ordered: PlannerTask[] = [];
+    ordered.push(...(filteredTasksByBucket.get(null) ?? []));
     activeBuckets.forEach((bucket) => {
-      (filteredTasksByBucket.get(bucket.id) ?? []).forEach((task) => ordered.push(task.id));
+      ordered.push(...(filteredTasksByBucket.get(bucket.id) ?? []));
     });
     return ordered;
   }, [activeBuckets, filteredTasksByBucket]);
 
-  const visibleTaskIndexById = useMemo(() => {
-    const map = new Map<string, number>();
-    orderedVisibleTaskIds.forEach((taskId, index) => {
-      map.set(taskId, index);
-    });
-    return map;
-  }, [orderedVisibleTaskIds]);
+  const visibleTaskIdSet = useMemo(
+    () => new Set(orderedVisibleTasks.map((task) => task.id)),
+    [orderedVisibleTasks],
+  );
 
   useEffect(() => {
-    const activeTaskIdSet = new Set(
-      activeTasks
-        .filter((task) => !task.archivedAt)
-        .map((task) => task.id),
-    );
-
-    setSelectedTaskIds((current) => current.filter((taskId) => activeTaskIdSet.has(taskId)));
-    if (selectionAnchorTaskId && !activeTaskIdSet.has(selectionAnchorTaskId)) {
-      setSelectionAnchorTaskId(null);
-    }
-  }, [activeTasks, selectionAnchorTaskId]);
+    setSelectedTaskIds((current) => {
+      const nextSelection = pruneTaskSelection(current, visibleTaskIdSet);
+      return nextSelection.size === current.size ? current : nextSelection;
+    });
+  }, [visibleTaskIdSet]);
 
   const stats = useMemo(() => {
     const archived = activeTasks.filter((task) => task.archivedAt !== null).length;
@@ -559,17 +742,34 @@ export default function App() {
     return map;
   }, [activeBuckets]);
 
-  const bucketIdByNormalizedName = useMemo(() => {
-    const map = new Map<string, string>();
-    activeBuckets.forEach((bucket) => map.set(normalizeBucketName(bucket.name), bucket.id));
-    return map;
-  }, [activeBuckets]);
+  const findUniqueQuickTaskBucketId = (projectId: string | null, name: string): string | null => {
+    if (!projectId || !name.trim()) return null;
+    const normalizedName = normalizeQuickAddName(name);
+    const matchingBuckets = state.buckets.filter((bucket) => (
+      bucket.projectId === projectId
+      && normalizeQuickAddName(bucket.name) === normalizedName
+    ));
+    return matchingBuckets.length === 1 ? matchingBuckets[0].id : null;
+  };
+
+  const setQuickTaskProjectTarget = (project: Project, clearBucket = false) => {
+    setQuickTaskProjectId(project.id);
+    setQuickTaskProjectName(project.name);
+    if (clearBucket) {
+      setQuickTaskBucketId(null);
+      setQuickTaskBucketName('');
+    } else {
+      setQuickTaskBucketId(findUniqueQuickTaskBucketId(project.id, quickTaskBucketName));
+    }
+    setQuickTaskMessage(null);
+  };
 
   const selectProject = (projectId: string) => {
-    if (!state.projects.some((project) => project.id === projectId)) return;
+    const project = state.projects.find((candidate) => candidate.id === projectId);
+    if (!project) return;
     setActiveProjectId(projectId);
-    setSelectedTaskIds([]);
-    setSelectionAnchorTaskId(null);
+    setQuickTaskProjectTarget(project);
+    setSelectedTaskIds(new Set());
     setActivePasteBucketId(null);
     setEditor(null);
     setSearchQuery('');
@@ -581,6 +781,7 @@ export default function App() {
     const project = createProject(trimmedName);
     dispatchPlanner({ type: 'ADD_PROJECT', project });
     setActiveProjectId(project.id);
+    setQuickTaskProjectTarget(project, true);
   };
 
   const renameProject = (projectId: string, name: string) => {
@@ -809,155 +1010,155 @@ export default function App() {
     }
   };
 
-  const bucketHotkeyTargets = useMemo(
-    () => [null, ...activeBuckets.map((bucket) => bucket.id)],
-    [activeBuckets],
-  );
-
-  const openQuickTaskComposer = (defaultBucketId: string | null = null) => {
-    setQuickTaskOpen(true);
-    setQuickTaskBucketId(defaultBucketId);
-    setQuickTaskBucketName(defaultBucketId ? bucketNameById.get(defaultBucketId) ?? '' : '');
-    window.requestAnimationFrame(() => {
-      quickTaskInputRef.current?.focus();
-    });
+  const handleQuickTaskTitleChange = (value: string) => {
+    setQuickTaskTitle(value);
+    setQuickTaskMessage(null);
   };
 
-  const closeQuickTaskComposer = () => {
-    setQuickTaskOpen(false);
-    setQuickTaskTitle('');
-    setQuickTaskBucketName('');
+  const handleQuickTaskBucketNameChange = (value: string) => {
+    setQuickTaskBucketName(value);
     setQuickTaskBucketId(null);
+    setQuickTaskMessage(null);
   };
 
-  const submitQuickTask = () => {
-    const title = quickTaskTitle.trim();
-    if (!title || !effectiveActiveProjectId) return;
+  const handleQuickTaskBucketSelectionChange = (bucketId: string | null) => {
+    setQuickTaskBucketId(bucketId);
+    setQuickTaskMessage(null);
+  };
 
-    const candidateBucketName = quickTaskBucketName.trim();
-    const hasValidBucketName = candidateBucketName
-      ? QUICK_TASK_BUCKET_NAME_PATTERN.test(candidateBucketName)
-      : false;
+  const handleQuickTaskProjectNameChange = (value: string) => {
+    const normalizedProjectName = normalizeQuickAddName(value);
+    const matchingProjects = normalizedProjectName
+      ? state.projects.filter(
+        (project) => normalizeQuickAddName(project.name) === normalizedProjectName,
+      )
+      : [];
+    const targetProjectId = normalizedProjectName
+      ? (matchingProjects.length === 1 ? matchingProjects[0].id : null)
+      : (effectiveActiveProjectId || null);
 
-    let targetBucketId: string | null = null;
-    let createdBucketName: string | null = null;
+    setQuickTaskProjectName(value);
+    setQuickTaskProjectId(null);
+    setQuickTaskBucketId(findUniqueQuickTaskBucketId(targetProjectId, quickTaskBucketName));
+    setQuickTaskMessage(null);
+  };
 
-    if (candidateBucketName && hasValidBucketName) {
-      const existingBucketId = bucketIdByNormalizedName.get(normalizeBucketName(candidateBucketName)) ?? null;
-      if (existingBucketId) {
-        targetBucketId = existingBucketId;
-      } else {
-        const newBucketId = createId();
-        dispatchPlanner({ type: 'ADD_BUCKET', bucket: createBucket(effectiveActiveProjectId, candidateBucketName, newBucketId) });
-        targetBucketId = newBucketId;
-        createdBucketName = candidateBucketName;
-        setPendingBucketWarp(true);
-      }
+  const handleQuickTaskProjectSelectionChange = (projectId: string | null) => {
+    if (!projectId) {
+      setQuickTaskProjectId(null);
+      return;
     }
 
-    dispatchPlanner({
-      type: 'ADD_TASK',
-      task: createTask(effectiveActiveProjectId, {
-        title,
-        description: '',
-        bucketId: targetBucketId,
-      }),
+    const project = state.projects.find((candidate) => candidate.id === projectId);
+    if (!project) {
+      setQuickTaskProjectId(null);
+      setQuickTaskBucketId(null);
+      return;
+    }
+
+    setQuickTaskProjectId(project.id);
+    setQuickTaskProjectName(project.name);
+    setQuickTaskBucketId(findUniqueQuickTaskBucketId(project.id, quickTaskBucketName));
+    setQuickTaskMessage(null);
+  };
+
+  const submitQuickTask = (override?: {
+    projectName?: string;
+    selectedProjectId?: string | null;
+  }) => {
+    const reservedIds = new Set<string>();
+    const projectName = override?.projectName ?? quickTaskProjectName;
+    const selectedProjectId = override?.selectedProjectId === undefined
+      ? quickTaskProjectId
+      : override.selectedProjectId;
+    const result = resolveQuickAdd({
+      data: state,
+      currentProjectId: effectiveActiveProjectId,
+      draft: {
+        taskTitle: quickTaskTitle,
+        bucketName: quickTaskBucketName,
+        projectName,
+        selectedBucketId: quickTaskBucketId,
+        selectedProjectId,
+      },
+      generated: {
+        projectId: createUniquePlannerId(state, reservedIds),
+        bucketId: createUniquePlannerId(state, reservedIds),
+        taskId: createUniquePlannerId(state, reservedIds),
+        timestamp: now(),
+      },
     });
 
-    setQuickTaskTitle('');
-    if (targetBucketId) {
-      const normalized = normalizeBucketName(createdBucketName ?? candidateBucketName);
-      const stableName = activeBuckets.find((bucket) => normalizeBucketName(bucket.name) === normalized)?.name
-        ?? createdBucketName
-        ?? candidateBucketName;
-      setQuickTaskBucketId(targetBucketId);
-      setQuickTaskBucketName(stableName);
+    if (!result.ok) {
+      setQuickTaskMessage(result.message);
+      window.requestAnimationFrame(() => {
+        if (result.field === 'project') quickTaskProjectInputRef.current?.focus();
+        else if (result.field === 'bucket') quickTaskBucketInputRef.current?.focus();
+        else quickTaskInputRef.current?.focus();
+      });
+      return;
+    }
+
+    const { addition, activationProjectId } = result;
+    if (addition.project || addition.bucket || addition.task) {
+      dispatchPlanner({ type: 'APPLY_QUICK_ADD', addition });
+    }
+
+    const targetProject = addition.project
+      ?? state.projects.find((project) => project.id === activationProjectId);
+    const targetBucket = addition.bucket
+      ?? (
+        addition.task?.bucketId
+          ? state.buckets.find((bucket) => bucket.id === addition.task?.bucketId)
+          : undefined
+      )
+      ?? (
+        quickTaskBucketName.trim()
+          ? state.buckets.find((bucket) => (
+            bucket.id === findUniqueQuickTaskBucketId(activationProjectId, quickTaskBucketName)
+          ))
+          : undefined
+      );
+
+    setActiveProjectId(activationProjectId);
+    if (activationProjectId !== effectiveActiveProjectId) {
+      setSelectedTaskIds(new Set());
+      setActivePasteBucketId(null);
+      setEditor(null);
+      setSearchQuery('');
+    }
+    if (targetProject) {
+      setQuickTaskProjectId(targetProject.id);
+      setQuickTaskProjectName(targetProject.name);
+    }
+    if (targetBucket) {
+      setQuickTaskBucketId(targetBucket.id);
+      setQuickTaskBucketName(targetBucket.name);
     } else {
       setQuickTaskBucketId(null);
       setQuickTaskBucketName('');
     }
-    setPendingTaskSurge(true);
-    quickTaskInputRef.current?.focus();
-  };
 
-  const cycleQuickTaskBucket = () => {
-    setQuickTaskBucketId((current) => {
-      const currentIndex = Math.max(0, bucketHotkeyTargets.findIndex((value) => value === current));
-      const nextIndex = (currentIndex + 1) % bucketHotkeyTargets.length;
-      const nextBucketId = bucketHotkeyTargets[nextIndex] ?? null;
-      setQuickTaskBucketName(nextBucketId ? bucketNameById.get(nextBucketId) ?? '' : '');
-      return nextBucketId;
+    const addedEntities = [
+      addition.project ? 'project' : null,
+      addition.bucket ? 'bucket' : null,
+      addition.task ? 'task' : null,
+    ].filter((entity): entity is string => entity !== null);
+    setQuickTaskMessage(
+      addedEntities.length > 0
+        ? `Added ${addedEntities.join(', ')}.`
+        : `Switched to ${targetProject?.name ?? 'the selected project'}.`,
+    );
+
+    if (addition.task) {
+      setQuickTaskTitle('');
+      setPendingTaskSurge(true);
+    }
+    if (addition.bucket) setPendingBucketWarp(true);
+
+    window.requestAnimationFrame(() => {
+      quickTaskInputRef.current?.focus();
     });
-  };
-
-  const quickTaskBucketSuggestion = useMemo(() => {
-    const typedValue = quickTaskBucketName.trim();
-    if (!typedValue) return null;
-
-    const typedLower = typedValue.toLowerCase();
-    const match = activeBuckets.find((bucket) => {
-      const name = bucket.name.trim();
-      const lower = name.toLowerCase();
-      return lower.startsWith(typedLower) && lower !== typedLower;
-    });
-
-    return match?.name ?? null;
-  }, [quickTaskBucketName, activeBuckets]);
-
-  const quickTaskBucketSuggestionSuffix = useMemo(() => {
-    if (!quickTaskBucketSuggestion) return '';
-    const typedValue = quickTaskBucketName.trim();
-    if (!typedValue) return '';
-    return quickTaskBucketSuggestion.slice(typedValue.length);
-  }, [quickTaskBucketName, quickTaskBucketSuggestion]);
-
-  const handleQuickTaskTitleKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeQuickTaskComposer();
-      return;
-    }
-
-    if (/^[0-9]$/.test(event.key)) {
-      const digit = Number(event.key);
-      const bucketTarget = digit === 0 ? null : activeBuckets[digit - 1]?.id;
-      if (digit === 0 || bucketTarget) {
-        event.preventDefault();
-        setQuickTaskBucketId(bucketTarget ?? null);
-        setQuickTaskBucketName(bucketTarget ? bucketNameById.get(bucketTarget) ?? '' : '');
-      }
-      return;
-    }
-
-    if (event.key !== 'Enter') return;
-
-    event.preventDefault();
-    submitQuickTask();
-  };
-
-  const handleQuickTaskBucketKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      closeQuickTaskComposer();
-      return;
-    }
-
-    if (event.key === 'ArrowRight' && quickTaskBucketSuggestion) {
-      const input = event.currentTarget;
-      const cursorAtEnd = input.selectionStart === input.value.length && input.selectionEnd === input.value.length;
-      if (cursorAtEnd) {
-        event.preventDefault();
-        setQuickTaskBucketName(quickTaskBucketSuggestion);
-        const bucketId = bucketIdByNormalizedName.get(normalizeBucketName(quickTaskBucketSuggestion)) ?? null;
-        setQuickTaskBucketId(bucketId);
-      }
-      return;
-    }
-
-    if (event.key !== 'Enter') return;
-
-    event.preventDefault();
-    submitQuickTask();
   };
 
   const registerBucketElement = (bucketId: string, element: HTMLElement | null) => {
@@ -1040,10 +1241,19 @@ export default function App() {
       const fallbackProjectId = activeProjectId === confirmDialog.action.projectId
         ? selectNearestProjectIdAfterDeletion(state.projects, confirmDialog.action.projectId)
         : activeProjectId;
+      const fallbackProject = state.projects.find((project) => project.id === fallbackProjectId);
       dispatchPlanner({ type: 'DELETE_PROJECT', projectId: confirmDialog.action.projectId });
       setActiveProjectId(fallbackProjectId);
-      setSelectedTaskIds([]);
-      setSelectionAnchorTaskId(null);
+      if (quickTaskProjectId === confirmDialog.action.projectId) {
+        if (fallbackProject) {
+          setQuickTaskProjectTarget(fallbackProject);
+        } else {
+          setQuickTaskProjectId(null);
+          setQuickTaskProjectName('');
+          setQuickTaskBucketId(null);
+        }
+      }
+      setSelectedTaskIds(new Set());
       setActivePasteBucketId(null);
     }
     setConfirmDialog(null);
@@ -1080,64 +1290,68 @@ export default function App() {
   const exportData = () => {
     if (!activeProject) return;
     setShowExportScopeMenu(false);
-    let dataToExport: PlannerData = state;
-    if (exportScope === 'unassigned') {
-      dataToExport = {
-        ...state,
-        projects: [activeProject],
-        buckets: [],
-        tasks: activeTasks.filter((task) => task.bucketId === null),
-        templates: [],
-        templateDefinitions: [],
-      };
-    } else if (exportScope.startsWith('bucket:')) {
-      const bucketId = exportScope.slice('bucket:'.length);
-      const bucket = activeBuckets.find((item) => item.id === bucketId) ?? null;
+    const exportedAt = new Date();
+    let payload: PlannerData | ReturnType<typeof buildPlannerScopedExchangeEnvelope>;
+    let filenameScope: PlannerExportFilenameScope;
 
-      // Collect template/definition for template-derived buckets
-      const templates: BucketTemplate[] = [];
-      const templateDefinitions: BucketTemplateDefinition[] = [];
-
-      if (bucket && bucket.templateDefinitionId !== null) {
-        const definition = state.templateDefinitions.find((d) => d.id === bucket.templateDefinitionId);
-        if (definition) {
-          templateDefinitions.push(definition);
-          const template = state.templates.find((t) => t.id === definition.templateId);
-          if (template) {
-            templates.push(template);
-          }
+    try {
+      if (exportScope === 'project') {
+        payload = buildPlannerScopedExchangeEnvelope(
+          state,
+          { kind: 'project', projectId: effectiveActiveProjectId },
+          exportedAt,
+        );
+        filenameScope = { kind: 'project', name: activeProject.name };
+      } else if (exportScope === 'unassigned') {
+        payload = buildPlannerScopedExchangeEnvelope(
+          state,
+          {
+            kind: 'unassigned',
+            projectId: effectiveActiveProjectId,
+          },
+          exportedAt,
+        );
+        filenameScope = { kind: 'unassigned' };
+      } else if (exportScope.startsWith('bucket:')) {
+        const bucketId = exportScope.slice('bucket:'.length);
+        const bucket = activeBuckets.find((item) => item.id === bucketId);
+        if (!bucket) {
+          throw new Error('The selected export bucket no longer exists.');
         }
+        payload = buildPlannerScopedExchangeEnvelope(
+          state,
+          {
+            kind: 'bucket',
+            projectId: effectiveActiveProjectId,
+            bucketId,
+          },
+          exportedAt,
+        );
+        filenameScope = { kind: 'bucket', name: bucket.name };
+      } else {
+        payload = buildRawPlannerDataExport(state, { kind: 'all' });
+        filenameScope = { kind: 'all' };
       }
-
-      dataToExport = {
-        ...state,
-        projects: [activeProject],
-        buckets: bucket ? [bucket] : [],
-        tasks: activeTasks.filter((task) => task.bucketId === bucketId),
-        templates,
-        templateDefinitions,
-      };
-    }
-
-    if (!isValidPlannerDataV2(dataToExport)) {
+    } catch {
       setDataActionMessage('Current planner data could not be validated for export.');
       return;
     }
 
-    const blob = new Blob([JSON.stringify(dataToExport, null, 2)], {
+    const filename = buildPlannerExportFilename(filenameScope, exportedAt);
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: 'application/json',
     });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `bsp-planner-${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = filename;
     link.style.display = 'none';
     document.body.appendChild(link);
 
     try {
       link.click();
       setDataActionMessage(null);
-      setExportNotice(`Export started — check your default Downloads folder for ${link.download}.`);
+      setExportNotice(`Export started — check your default Downloads folder for ${filename}.`);
     } catch {
       setExportNotice(null);
       link.remove();
@@ -1152,75 +1366,265 @@ export default function App() {
     }, 1000);
   };
 
-  const readPlannerDataFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
+  const readJsonFromFile = async (
+    event: ChangeEvent<HTMLInputElement>,
+  ): Promise<
+    | { ok: true; value: unknown }
+    | { ok: false; message: string }
+    | null
+  > => {
     const file = event.target.files?.[0];
     event.target.value = '';
     if (!file) return null;
 
     try {
-      const parsed: unknown = JSON.parse(await file.text());
-      const result = coercePlannerDataToV2(parsed);
-      setDataActionMessage(null);
-      return result.data;
+      return { ok: true, value: JSON.parse(await file.text()) as unknown };
     } catch (error) {
       if (error instanceof SyntaxError) {
-        setDataActionMessage('Selected file could not be read as JSON.');
-        return null;
+        return { ok: false, message: 'Selected file could not be read as JSON.' };
       }
-      setDataActionMessage(`Selected file is not a valid ${APP_NAME} export.`);
-      return null;
+      return { ok: false, message: 'Selected file could not be read.' };
     }
   };
 
   const restoreDataFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const parsedData = await readPlannerDataFromFile(event);
-    if (!parsedData) return;
-    setPendingUploadData(null);
-    setPendingRestoreData(parsedData);
+    const readSequence = ++restoreFileReadSequenceRef.current;
+    projectImportFileReadSequenceRef.current += 1;
+    setPendingRestoreData(null);
+    setPendingProjectImport(null);
+    setSelectedProjectImportSourceId('');
+    setProjectImportDestinationKind(null);
+    setSelectedProjectImportDestinationId('');
+    const fileResult = await readJsonFromFile(event);
+    if (readSequence !== restoreFileReadSequenceRef.current || !fileResult) return;
+    if (!fileResult.ok) {
+      setDataActionMessage(fileResult.message);
+      return;
+    }
+
+    if (
+      isValidPlannerScopedExchangeEnvelope(fileResult.value)
+      || isValidProjectExchangeEnvelope(fileResult.value)
+      || isProjectExchangeEnvelopeCandidate(fileResult.value)
+    ) {
+      setPendingRestoreData(null);
+      setDataActionMessage(
+        'Scoped exchange files cannot be restored. Use Import project JSON instead; Restore accepts All data and legacy raw v1/v2 backups.',
+      );
+      return;
+    }
+
+    try {
+      const result = coercePlannerDataToV2(fileResult.value);
+      setPendingProjectImport(null);
+      setSelectedProjectImportSourceId('');
+      setProjectImportDestinationKind(null);
+      setSelectedProjectImportDestinationId('');
+      setPendingRestoreData(result.data);
+      setDataActionMessage(null);
+    } catch {
+      setPendingRestoreData(null);
+      setDataActionMessage(`Selected file is not a valid ${APP_NAME} full-data backup.`);
+    }
   };
 
-  const mergeDataFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
-    const parsedData = await readPlannerDataFromFile(event);
-    if (!parsedData) return;
+  const clearPendingProjectImport = () => {
+    projectImportFileReadSequenceRef.current += 1;
+    setPendingProjectImport(null);
+    setSelectedProjectImportSourceId('');
+    setProjectImportDestinationKind(null);
+    setSelectedProjectImportDestinationId('');
+  };
+
+  const clearWorkspaceTransientState = (clearClipboard: boolean) => {
+    setSelectedTaskIds(new Set());
+    clearLatestPasteUndo();
+    setActivePasteBucketId(null);
+    if (clearClipboard) {
+      setTaskClipboard([]);
+    }
+    setEditor(null);
+    setSearchQuery('');
+    setConfirmDialog(null);
+    setRenameDialog(null);
+    setRenameDialogError(null);
+    setShowArchiveConfirm(false);
+    setBoardBucketAddOpen(false);
+    setBoardBucketNameDraft('');
+    setPendingBucketWarp(false);
+    setHighlightedBucketId(null);
+    setHighlightedTaskId(null);
+    setHighlightedTaskBucketId(null);
+    setUploadedTaskIds([]);
+    setPendingTaskSurge(false);
+    setDraggedTaskId(null);
+    setDraggedTaskIds([]);
+    setDraggedBucketId(null);
+    setActiveBucketDropIndex(null);
+    setSettledBucketDropIndex(null);
+    setSettledBucketId(null);
+    setSettledBucketFrom(null);
+    cancelBoardEdgeAutoscroll();
+
+    if (bucketHighlightTimeoutRef.current !== null) {
+      window.clearTimeout(bucketHighlightTimeoutRef.current);
+      bucketHighlightTimeoutRef.current = null;
+    }
+    if (taskSurgeTimeoutRef.current !== null) {
+      window.clearTimeout(taskSurgeTimeoutRef.current);
+      taskSurgeTimeoutRef.current = null;
+    }
+    if (uploadHaloTimeoutRef.current !== null) {
+      window.clearTimeout(uploadHaloTimeoutRef.current);
+      uploadHaloTimeoutRef.current = null;
+    }
+    if (bucketDropSettleTimeoutRef.current !== null) {
+      window.clearTimeout(bucketDropSettleTimeoutRef.current);
+      bucketDropSettleTimeoutRef.current = null;
+    }
+  };
+
+  const importProjectFromFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const readSequence = ++projectImportFileReadSequenceRef.current;
+    restoreFileReadSequenceRef.current += 1;
+    setPendingProjectImport(null);
+    setSelectedProjectImportSourceId('');
+    setProjectImportDestinationKind(null);
+    setSelectedProjectImportDestinationId('');
     setPendingRestoreData(null);
-    setPendingUploadData(parsedData);
+    const fileResult = await readJsonFromFile(event);
+    if (readSequence !== projectImportFileReadSequenceRef.current || !fileResult) return;
+    if (!fileResult.ok) {
+      setDataActionMessage(fileResult.message);
+      return;
+    }
+
+    try {
+      const parsed = parsePlannerProjectImport(fileResult.value);
+      setPendingProjectImport(parsed);
+      setSelectedProjectImportSourceId(parsed.autoSelectedSourceProjectId ?? '');
+      setProjectImportDestinationKind(null);
+      setSelectedProjectImportDestinationId('');
+      setDataActionMessage(null);
+    } catch (error) {
+      clearPendingProjectImport();
+      setDataActionMessage(
+        error instanceof Error
+          ? error.message
+          : `Selected file is not a valid ${APP_NAME} project import.`,
+      );
+    }
+  };
+
+  const confirmProjectImport = () => {
+    if (!pendingProjectImport || !selectedProjectImportSourceId || !projectImportDestinationKind) {
+      return;
+    }
+    if (projectImportDestinationKind === 'existing' && !selectedProjectImportDestinationId) {
+      return;
+    }
+
+    try {
+      const result = importPlannerProject(state, pendingProjectImport, {
+        sourceProjectId: selectedProjectImportSourceId,
+        destination: projectImportDestinationKind === 'new'
+          ? { kind: 'new' }
+          : { kind: 'existing', projectId: selectedProjectImportDestinationId },
+        createUniqueId: createId,
+        importedAt: now(),
+      });
+      const destinationProject = result.data.projects.find(
+        (project) => project.id === result.activationProjectId,
+      );
+
+      clearRestoreRecoverySnapshot(localStorage);
+      setLastRestoreBackup(null);
+      setHideRestoreUndoCard(false);
+      setIsRestoreUndoClosing(false);
+      clearWorkspaceTransientState(false);
+      dispatchPlanner({ type: 'REPLACE_DATA', data: result.data });
+      setActiveProjectId(result.activationProjectId);
+      setQuickTaskProjectId(result.activationProjectId);
+      setQuickTaskProjectName(destinationProject?.name ?? '');
+      setQuickTaskBucketId(null);
+      setQuickTaskBucketName('');
+      setQuickTaskMessage(null);
+
+      setUploadedTaskIds(result.uploadedTaskIds);
+      uploadHaloTimeoutRef.current = window.setTimeout(() => {
+        setUploadedTaskIds([]);
+        uploadHaloTimeoutRef.current = null;
+      }, UPLOAD_HALO_DURATION_MS);
+
+      clearPendingProjectImport();
+      setDataActionMessage(formatProjectImportSummary(
+        result.summary,
+        result.sourceProjectName,
+        destinationProject?.name ?? 'Untitled project',
+      ));
+    } catch (error) {
+      setDataActionMessage(
+        error instanceof Error
+          ? `Project import could not be completed: ${error.message}`
+          : 'Project import could not be completed.',
+      );
+    }
   };
 
   const confirmRestoreData = () => {
     if (!pendingRestoreData) return;
-    setLastRestoreBackup(state);
+    const recoveryResult = saveRestoreRecoverySnapshot(
+      localStorage,
+      state,
+      pendingRestoreData,
+      now(),
+    );
+    if (!recoveryResult.ok) {
+      setDataActionMessage(
+        'Restore was not started because a recovery snapshot could not be saved locally.',
+      );
+      return;
+    }
+
+    const restoredProjectId = selectInitialProjectId(pendingRestoreData.projects);
+    const restoredProject = pendingRestoreData.projects.find(
+      (project) => project.id === restoredProjectId,
+    );
+    setLastRestoreBackup(recoveryResult.snapshot.previousData);
     setHideRestoreUndoCard(false);
     setIsRestoreUndoClosing(false);
+    clearWorkspaceTransientState(true);
     dispatchPlanner({ type: 'REPLACE_DATA', data: pendingRestoreData });
+    setActiveProjectId(restoredProjectId);
+    setQuickTaskProjectId(restoredProjectId || null);
+    setQuickTaskProjectName(restoredProject?.name ?? '');
+    setQuickTaskBucketId(null);
+    setQuickTaskBucketName('');
+    setQuickTaskMessage(null);
+    clearPendingProjectImport();
     setPendingRestoreData(null);
     setDataActionMessage(null);
   };
 
-  const confirmUploadData = () => {
-    if (!pendingUploadData || !effectiveActiveProjectId) return;
-    const mergedUpload = mergeUploadedPlannerDataV2(state, pendingUploadData, { targetProjectId: effectiveActiveProjectId });
-    dispatchPlanner({ type: 'REPLACE_DATA', data: mergedUpload.data });
-    if (uploadHaloTimeoutRef.current !== null) {
-      window.clearTimeout(uploadHaloTimeoutRef.current);
-    }
-    setUploadedTaskIds((current) => Array.from(new Set([...current, ...mergedUpload.uploadedTaskIds])));
-    uploadHaloTimeoutRef.current = window.setTimeout(() => {
-      setUploadedTaskIds([]);
-      uploadHaloTimeoutRef.current = null;
-    }, UPLOAD_HALO_DURATION_MS);
-    setPendingUploadData(null);
-    setDataActionMessage(
-      `Uploaded ${mergedUpload.uploadedTaskIds.length} task(s); merged into ${mergedUpload.mergedIntoExistingBucketCount} existing bucket(s); created ${mergedUpload.createdBucketCount} bucket(s); skipped ${mergedUpload.skippedDuplicateCount} duplicate task(s).`,
-    );
-  };
-
   const undoRestoreData = () => {
     if (!lastRestoreBackup) return;
+    const restoredProjectId = selectInitialProjectId(lastRestoreBackup.projects);
+    const restoredProject = lastRestoreBackup.projects.find(
+      (project) => project.id === restoredProjectId,
+    );
+    clearRestoreRecoverySnapshot(localStorage);
+    clearWorkspaceTransientState(true);
     dispatchPlanner({ type: 'REPLACE_DATA', data: lastRestoreBackup });
+    setActiveProjectId(restoredProjectId);
+    setQuickTaskProjectId(restoredProjectId || null);
+    setQuickTaskProjectName(restoredProject?.name ?? '');
+    setQuickTaskBucketId(null);
+    setQuickTaskBucketName('');
+    setQuickTaskMessage(null);
     setLastRestoreBackup(null);
     setHideRestoreUndoCard(false);
     setIsRestoreUndoClosing(false);
-    setDataActionMessage(null);
+    setDataActionMessage('Restore undone.');
   };
 
   const dismissRestoreUndoCard = () => {
@@ -1232,6 +1636,8 @@ export default function App() {
     restoreUndoCloseTimeoutRef.current = window.setTimeout(() => {
       setHideRestoreUndoCard(true);
       setIsRestoreUndoClosing(false);
+      setLastRestoreBackup(null);
+      clearRestoreRecoverySnapshot(localStorage);
       restoreUndoCloseTimeoutRef.current = null;
     }, 420);
   };
@@ -1239,10 +1645,34 @@ export default function App() {
   const pendingRestoreSummary = pendingRestoreData
     ? `${pendingRestoreData.tasks.length} task(s) and ${pendingRestoreData.buckets.length} bucket(s)`
     : '';
-  const pendingUploadSummary = pendingUploadData
-    ? `${pendingUploadData.tasks.length} task(s) and ${pendingUploadData.buckets.length} bucket(s)`
+  const projectImportSourceOptions = pendingProjectImport?.sourceProjectChoices.map((choice) => ({
+    projectId: choice.projectId,
+    label: choice.label,
+  })) ?? [];
+  const projectImportDestinationProjects = buildProjectChoiceOptions(state.projects);
+  const projectImportSourceKindLabel = pendingProjectImport
+    ? pendingProjectImport.sourceKind === 'scoped-envelope'
+      ? 'Scoped exchange export ready to import.'
+      : pendingProjectImport.sourceKind === 'project-envelope'
+        ? 'Legacy project export ready to import.'
+      : pendingProjectImport.sourceKind === 'raw-v1'
+        ? 'Legacy planner export ready; choose one source project.'
+        : 'Planner backup ready; choose one source project.'
     : '';
-  const exportScopeOptionCount = 2 + activeBuckets.length;
+  const canConfirmProjectImport = Boolean(
+    pendingProjectImport
+    && projectImportSourceOptions.some(
+      (option) => option.projectId === selectedProjectImportSourceId,
+    )
+    && projectImportDestinationKind
+    && (
+      projectImportDestinationKind === 'new'
+      || projectImportDestinationProjects.some(
+        (project) => project.projectId === selectedProjectImportDestinationId,
+      )
+    ),
+  );
+  const exportScopeOptionCount = 3 + activeBuckets.length;
 
   useEffect(() => {
     if (exportScope.startsWith('bucket:')) {
@@ -1275,58 +1705,17 @@ export default function App() {
     scheduleSearchStatusHide(1600);
   };
 
-  const applyTaskSelection = (
-    taskId: string,
-    options: {
-      shift: boolean;
-      toggle: boolean;
-    },
-  ) => {
-    if (options.shift && selectionAnchorTaskId) {
-      const anchorIndex = visibleTaskIndexById.get(selectionAnchorTaskId);
-      const targetIndex = visibleTaskIndexById.get(taskId);
-      if (anchorIndex !== undefined && targetIndex !== undefined) {
-        const [start, end] = anchorIndex < targetIndex
-          ? [anchorIndex, targetIndex]
-          : [targetIndex, anchorIndex];
-        const rangeIds = orderedVisibleTaskIds.slice(start, end + 1);
-        setSelectedTaskIds((current) => {
-          if (options.toggle) {
-            return Array.from(new Set([...current, ...rangeIds]));
-          }
-          return rangeIds;
-        });
-        setActivePasteBucketId(activeTasks.find((task) => task.id === taskId)?.bucketId ?? null);
-        return;
-      }
-    }
-
-    if (options.toggle) {
-      setSelectedTaskIds((current) => {
-        const exists = current.includes(taskId);
-        if (exists) {
-          return current.filter((item) => item !== taskId);
-        }
-        return [...current, taskId];
-      });
-      setSelectionAnchorTaskId(taskId);
-      setActivePasteBucketId(activeTasks.find((task) => task.id === taskId)?.bucketId ?? null);
-      return;
-    }
-
-    setSelectedTaskIds([taskId]);
-    setSelectionAnchorTaskId(taskId);
-    setActivePasteBucketId(activeTasks.find((task) => task.id === taskId)?.bucketId ?? null);
+  const setTaskSelection = (taskId: string, shouldSelect: boolean) => {
+    setSelectedTaskIds((current) => {
+      if (current.has(taskId) === shouldSelect) return current;
+      return toggleTaskSelection(current, taskId);
+    });
   };
 
-  const handleTaskCardSelection = (taskId: string, event: ReactMouseEvent<HTMLElement>) => {
-    const target = event.target as HTMLElement;
-    if (target.closest('button, input, label, textarea, select, a')) return;
-
-    applyTaskSelection(taskId, {
-      shift: event.shiftKey,
-      toggle: event.ctrlKey || event.metaKey,
-    });
+  const setBucketSelection = (bucketId: string | null, shouldSelect: boolean) => {
+    setSelectedTaskIds((current) => (
+      setVisibleBucketTaskSelection(current, orderedVisibleTasks, bucketId, shouldSelect)
+    ));
   };
 
   const setClipboardFromTasks = (tasks: PlannerTask[]) => {
@@ -1334,54 +1723,74 @@ export default function App() {
       tasks.map((task) => ({
         title: task.title,
         description: task.description,
+        completed: task.completed,
+        pinned: task.pinned,
       })),
     );
   };
 
-  const copyTaskToClipboard = (task: PlannerTask, bucketName: string) => {
-    setClipboardFromTasks([task]);
-    setSelectedTaskIds([task.id]);
-    setSelectionAnchorTaskId(task.id);
-    setActivePasteBucketId(task.bucketId);
-
+  const copyTextWithStatus = (
+    text: string,
+    successMessage: string,
+    failureMessage: string,
+  ) => {
     void (async () => {
       try {
-        await copyTextToClipboard(formatTaskForSingleCopy(task, bucketName));
-        showTemporaryStatus(`Copied "${task.title}"`);
+        await copyTextToClipboard(text);
+        showTemporaryStatus(successMessage);
       } catch {
-        showTemporaryStatus('Could not copy task');
+        showTemporaryStatus(failureMessage);
       }
     })();
+  };
+
+  const copyTaskToClipboard = (task: PlannerTask, bucketName: string) => {
+    setClipboardFromTasks([task]);
+    setActivePasteBucketId(task.bucketId);
+    copyTextWithStatus(
+      formatTaskForSingleCopy(task, bucketName),
+      `Copied "${task.title}"`,
+      'Could not copy task',
+    );
   };
 
   const copyBucketTasksToClipboard = (bucketId: string | null) => {
-    const bucketName = bucketId ? bucketNameById.get(bucketId) ?? 'Unassigned' : 'Unassigned';
-    const tasks = tasksByBucket.get(bucketId) ?? [];
-
-    if (tasks.length === 0) {
-      showTemporaryStatus(`No tasks to copy from ${bucketName}`);
+    let copyDocument: ReturnType<typeof buildStructuredBucketCopyDocument>;
+    try {
+      copyDocument = buildStructuredBucketCopyDocument(state, {
+        projectId: effectiveActiveProjectId,
+        bucketId,
+      });
+    } catch {
+      showTemporaryStatus('Could not copy bucket');
       return;
     }
 
-    setClipboardFromTasks(tasks);
-    setSelectedTaskIds(tasks.map((task) => task.id));
-    setSelectionAnchorTaskId(tasks[0]?.id ?? null);
+    setTaskClipboard(copyDocument.tasks);
     setActivePasteBucketId(bucketId);
+    copyTextWithStatus(
+      JSON.stringify(copyDocument, null, 2),
+      `Copied ${copyDocument.bucket.name} as JSON with ${copyDocument.tasks.length} task${copyDocument.tasks.length === 1 ? '' : 's'}`,
+      `Could not copy ${copyDocument.bucket.name}`,
+    );
+  };
 
-    void (async () => {
-      try {
-        await copyTextToClipboard(formatBucketForOrderedCopy(bucketName, tasks));
-        showTemporaryStatus(`Copied ${bucketName} and ${tasks.length} task${tasks.length === 1 ? '' : 's'}`);
-      } catch {
-        showTemporaryStatus(`Could not copy ${bucketName}`);
-      }
-    })();
+  const copyActiveProjectToClipboard = () => {
+    setTaskClipboard([]);
+    setActivePasteBucketId(null);
+    try {
+      copyTextWithStatus(
+        formatProjectMarkdownForCopy(state, effectiveActiveProjectId),
+        `Copied project "${activeProject.name}"`,
+        `Could not copy project "${activeProject.name}"`,
+      );
+    } catch {
+      showTemporaryStatus(`Could not copy project "${activeProject.name}"`);
+    }
   };
 
   const copySelectedTasks = () => {
-    const tasks = activeTasks.filter(
-      (task) => selectedTaskIdSet.has(task.id) && !task.archivedAt,
-    );
+    const tasks = getSelectedTasksInVisibleOrder(selectedTaskIds, orderedVisibleTasks);
     if (tasks.length === 0) {
       showTemporaryStatus('Select tasks to copy first');
       return;
@@ -1389,14 +1798,11 @@ export default function App() {
 
     setClipboardFromTasks(tasks);
 
-    void (async () => {
-      try {
-        await copyTextToClipboard(tasks.map(formatTaskForOrderedCopy).join('\n'));
-        showTemporaryStatus(`Copied ${tasks.length} selected task${tasks.length === 1 ? '' : 's'}`);
-      } catch {
-        showTemporaryStatus('Could not copy selected tasks');
-      }
-    })();
+    copyTextWithStatus(
+      tasks.map(formatTaskForOrderedCopy).join('\n'),
+      `Copied ${tasks.length} selected task${tasks.length === 1 ? '' : 's'}`,
+      'Could not copy selected tasks',
+    );
   };
 
   const pasteTasksIntoBucket = (bucketId: string | null) => {
@@ -1406,26 +1812,63 @@ export default function App() {
       return;
     }
 
+    const destinationBucketId = (
+      bucketId !== null
+      && activeBuckets.some((bucket) => bucket.id === bucketId)
+    )
+      ? bucketId
+      : null;
+    const pastedTasks = taskClipboard.map((task) => createTask(effectiveActiveProjectId, {
+      title: task.title,
+      description: task.description,
+      bucketId: destinationBucketId,
+    }));
+    const bucketName = destinationBucketId
+      ? bucketNameById.get(destinationBucketId) ?? 'Unassigned'
+      : 'Unassigned';
+
+    clearLatestPasteUndo();
     dispatchPlanner({
       type: 'ADD_TASK_BATCH',
-      tasks: taskClipboard.map((task) => createTask(effectiveActiveProjectId, {
-        title: task.title,
-        description: task.description,
-        bucketId,
-      })),
+      tasks: pastedTasks,
     });
+    setLatestPasteUndo({
+      projectId: effectiveActiveProjectId,
+      taskIds: pastedTasks.map((task) => task.id),
+      destinationName: bucketName,
+    });
+    pasteUndoTimeoutRef.current = window.setTimeout(() => {
+      setLatestPasteUndo(null);
+      pasteUndoTimeoutRef.current = null;
+    }, PASTE_UNDO_DURATION_MS);
 
     setPendingTaskSurge(true);
-    setActivePasteBucketId(bucketId);
-    const bucketName = bucketId ? bucketNameById.get(bucketId) ?? 'Unassigned' : 'Unassigned';
+    setActivePasteBucketId(destinationBucketId);
     showTemporaryStatus(`Pasted ${taskClipboard.length} task${taskClipboard.length === 1 ? '' : 's'} into ${bucketName}`);
+  };
+
+  const keepLatestPaste = () => {
+    if (!latestPasteUndo) return;
+    const taskCount = latestPasteUndo.taskIds.length;
+    clearLatestPasteUndo();
+    showTemporaryStatus(`Kept ${taskCount} pasted task${taskCount === 1 ? '' : 's'}`);
+  };
+
+  const undoLatestPaste = () => {
+    if (!latestPasteUndo) return;
+    const taskCount = latestPasteUndo.taskIds.length;
+    dispatchPlanner({
+      type: 'DELETE_TASKS_EXACT',
+      projectId: latestPasteUndo.projectId,
+      taskIds: latestPasteUndo.taskIds,
+    });
+    clearLatestPasteUndo();
+    showTemporaryStatus(`Undid ${taskCount} pasted task${taskCount === 1 ? '' : 's'}`);
   };
 
   const handleTaskDragStart = (taskId: string, taskIds: string[]) => {
     setDraggedTaskId(taskId);
     setDraggedTaskIds(taskIds);
-    setSelectedTaskIds(taskIds);
-    setSelectionAnchorTaskId(taskId);
     setActivePasteBucketId(activeTasks.find((task) => task.id === taskId)?.bucketId ?? null);
   };
 
@@ -1460,34 +1903,6 @@ export default function App() {
     });
   };
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"]')) return;
-
-      const withMeta = event.ctrlKey || event.metaKey;
-      if (!withMeta) return;
-
-      const key = event.key.toLowerCase();
-
-      if (key === 'c' && selectedTaskIds.length > 0) {
-        event.preventDefault();
-        copySelectedTasks();
-        return;
-      }
-
-      if (key === 'v' && taskClipboard.length > 0) {
-        event.preventDefault();
-        pasteTasksIntoBucket(activePasteBucketId);
-      }
-    };
-
-    window.addEventListener('keydown', onKeyDown);
-    return () => {
-      window.removeEventListener('keydown', onKeyDown);
-    };
-  }, [activePasteBucketId, activeTasks, selectedTaskIds.length, taskClipboard, selectedTaskIdSet]);
-
   // Keyboard shortcuts for undo/redo, copy/paste
   usePlannerKeyboardShortcuts({
     onUndo: () => {
@@ -1501,7 +1916,7 @@ export default function App() {
       showTemporaryStatus('Redo');
     },
     onCopy: () => {
-      if (selectedTaskIds.length === 0) return;
+      if (selectedTaskIds.size === 0) return;
       copySelectedTasks();
     },
     onPaste: () => {
@@ -1525,9 +1940,9 @@ export default function App() {
   }, [pendingRestoreData]);
 
   useEffect(() => {
-    if (!pendingUploadData) return;
-    ensureScrollableTargetInView(sidepanelRef.current, uploadConfirmRef.current);
-  }, [pendingUploadData]);
+    if (!pendingProjectImport) return;
+    ensureScrollableTargetInView(sidepanelRef.current, projectImportConfirmRef.current);
+  }, [pendingProjectImport]);
 
   useEffect(() => {
     if (!draggedTaskId && !draggedBucketId) {
@@ -1650,11 +2065,6 @@ export default function App() {
     if (!showExportScopeMenu) return;
     ensureScrollableTargetInView(sidepanelRef.current, exportScopeMenuRef.current);
   }, [showExportScopeMenu]);
-
-  useEffect(() => {
-    if (!quickTaskOpen) return;
-    ensureScrollableTargetInView(sidepanelRef.current, quickTaskShellRef.current, 16);
-  }, [quickTaskOpen]);
 
   const clearSidepanelCloseTimer = () => {
     if (sidepanelCloseTimeoutRef.current !== null) {
@@ -1800,6 +2210,15 @@ export default function App() {
         </div>
       )}
 
+      {latestPasteUndo && (
+        <PasteUndoNotice
+          taskCount={latestPasteUndo.taskIds.length}
+          destinationName={latestPasteUndo.destinationName}
+          onKeep={keepLatestPaste}
+          onUndo={undoLatestPaste}
+        />
+      )}
+
       <header className="app-header">
         <div className="brand-block">
           <span className="brand-icon" aria-hidden="true">{APP_ICON_TEXT}</span>
@@ -1883,7 +2302,7 @@ export default function App() {
 
       <div className={`workspace-layout ${isSidepanelOpen ? 'sidepanel-open' : 'sidepanel-closed'}`}>
         <section
-          className={`board-stage board-zoom-${boardZoomIndex}`}
+          className={`board-stage board-zoom-${boardZoomPercent}`}
           aria-label="Planner board"
         >
           <div className="board-stage-toolbar">
@@ -1891,17 +2310,28 @@ export default function App() {
               <button
                 type="button"
                 className="zoom-button"
-                onClick={() => setBoardZoomIndex((current) => Math.max(MIN_BOARD_ZOOM_INDEX, current - 1))}
-                disabled={boardZoomIndex === MIN_BOARD_ZOOM_INDEX}
+                onClick={() => setBoardZoomPercent((current) => stepBoardZoom(current, -1))}
+                disabled={boardZoomPercent === BOARD_ZOOM_PERCENTAGES[0]}
+                aria-label="Zoom board out"
+                title="Zoom board out"
               >
                 -
               </button>
-              <span className="zoom-status">View</span>
+              <span
+                className="zoom-status"
+                aria-label="Board zoom level"
+                aria-live="polite"
+                aria-atomic="true"
+              >
+                {boardZoomPercent}%
+              </span>
               <button
                 type="button"
                 className="zoom-button"
-                onClick={() => setBoardZoomIndex((current) => Math.min(MAX_BOARD_ZOOM_INDEX, current + 1))}
-                disabled={boardZoomIndex === MAX_BOARD_ZOOM_INDEX}
+                onClick={() => setBoardZoomPercent((current) => stepBoardZoom(current, 1))}
+                disabled={boardZoomPercent === BOARD_ZOOM_PERCENTAGES[BOARD_ZOOM_PERCENTAGES.length - 1]}
+                aria-label="Zoom board in"
+                title="Zoom board in"
               >
                 +
               </button>
@@ -1909,13 +2339,16 @@ export default function App() {
             <div className="board-actions" role="group" aria-label="Board actions">
               <button
                 type="button"
-                className="secondary-button"
-                onClick={copySelectedTasks}
-                disabled={selectedTaskIds.length === 0}
-                title={selectedTaskIds.length === 0 ? 'Select task cards to copy' : 'Copy selected tasks'}
+                className="secondary-button project-copy-button"
+                onClick={copyActiveProjectToClipboard}
               >
-                Copy selected ({selectedTaskIds.length})
+                Copy project
               </button>
+              <SelectionActions
+                selectedCount={getSelectedTaskCount(selectedTaskIds)}
+                onCopySelected={copySelectedTasks}
+                onClearAll={() => setSelectedTaskIds(new Set())}
+              />
               <button
                 type="button"
                 className="icon-button"
@@ -1989,19 +2422,21 @@ export default function App() {
             onApplyTemplate={applyTemplateToActiveProject}
             quickTaskShellRef={quickTaskShellRef}
             quickTaskInputRef={quickTaskInputRef}
+            quickTaskProjectInputRef={quickTaskProjectInputRef}
             quickTaskBucketInputRef={quickTaskBucketInputRef}
-            quickTaskOpen={quickTaskOpen}
             quickTaskTitle={quickTaskTitle}
+            quickTaskProjectName={quickTaskProjectName}
+            quickTaskProjectId={quickTaskProjectId}
             quickTaskBucketName={quickTaskBucketName}
-            quickTaskBucketSuggestionSuffix={quickTaskBucketSuggestionSuffix}
+            quickTaskBucketId={quickTaskBucketId}
+            quickTaskProjectBuckets={quickTaskProjectBuckets}
+            quickTaskMessage={quickTaskMessage}
             activeBuckets={activeBuckets}
-            bucketIdByNormalizedName={bucketIdByNormalizedName}
-            normalizeBucketName={normalizeBucketName}
-            onQuickTaskTitleChange={setQuickTaskTitle}
-            onQuickTaskBucketNameChange={setQuickTaskBucketName}
-            onQuickTaskBucketIdChange={setQuickTaskBucketId}
-            onQuickTaskTitleKeyDown={handleQuickTaskTitleKeyDown}
-            onQuickTaskBucketKeyDown={handleQuickTaskBucketKeyDown}
+            onQuickTaskTitleChange={handleQuickTaskTitleChange}
+            onQuickTaskProjectNameChange={handleQuickTaskProjectNameChange}
+            onQuickTaskProjectIdChange={handleQuickTaskProjectSelectionChange}
+            onQuickTaskBucketNameChange={handleQuickTaskBucketNameChange}
+            onQuickTaskBucketIdChange={handleQuickTaskBucketSelectionChange}
             onSubmitQuickTask={submitQuickTask}
             bucketName={bucketName}
             onBucketNameChange={setBucketName}
@@ -2028,13 +2463,19 @@ export default function App() {
             )}
             onUnarchiveTask={(task) => dispatchPlanner({ type: 'UNARCHIVE_TASK', projectId: task.projectId, taskId: task.id, updatedAt: now() })}
             getBucketName={(bucketId) => (bucketId ? bucketNameById.get(bucketId) ?? 'Unassigned' : 'Unassigned')}
-            uploadInputRef={uploadInputRef}
+            projectImportInputRef={projectImportInputRef}
             restoreInputRef={restoreInputRef}
-            uploadConfirmRef={uploadConfirmRef}
+            projectImportConfirmRef={projectImportConfirmRef}
             restoreConfirmRef={restoreConfirmRef}
             exportScopeMenuRef={exportScopeMenuRef}
-            hasPendingUploadData={Boolean(pendingUploadData)}
-            pendingUploadSummary={pendingUploadSummary}
+            hasPendingProjectImport={Boolean(pendingProjectImport)}
+            projectImportSourceKindLabel={projectImportSourceKindLabel}
+            projectImportSourceOptions={projectImportSourceOptions}
+            selectedProjectImportSourceId={selectedProjectImportSourceId}
+            projectImportDestinationKind={projectImportDestinationKind}
+            selectedProjectImportDestinationId={selectedProjectImportDestinationId}
+            projectImportDestinationProjects={projectImportDestinationProjects}
+            canConfirmProjectImport={canConfirmProjectImport}
             hasPendingRestoreData={Boolean(pendingRestoreData)}
             pendingRestoreSummary={pendingRestoreSummary}
             hasLastRestoreBackup={Boolean(lastRestoreBackup)}
@@ -2044,8 +2485,16 @@ export default function App() {
             showExportScopeMenu={showExportScopeMenu}
             exportScope={exportScope}
             exportScopeOptionCount={exportScopeOptionCount}
-            onConfirmUploadData={confirmUploadData}
-            onCancelUploadData={() => setPendingUploadData(null)}
+            onConfirmProjectImport={confirmProjectImport}
+            onCancelProjectImport={clearPendingProjectImport}
+            onProjectImportSourceChange={setSelectedProjectImportSourceId}
+            onProjectImportDestinationKindChange={(kind) => {
+              setProjectImportDestinationKind(kind);
+              if (kind === 'new') {
+                setSelectedProjectImportDestinationId('');
+              }
+            }}
+            onProjectImportDestinationChange={setSelectedProjectImportDestinationId}
             onToggleExportScopeMenu={() => setShowExportScopeMenu((current) => !current)}
             onSelectExportScope={(scope) => {
               setExportScope(scope);
@@ -2053,15 +2502,21 @@ export default function App() {
             }}
             onExportData={exportData}
             onConfirmRestoreData={confirmRestoreData}
-            onCancelRestoreData={() => setPendingRestoreData(null)}
+            onCancelRestoreData={() => {
+              restoreFileReadSequenceRef.current += 1;
+              setPendingRestoreData(null);
+            }}
             onDismissRestoreUndoCard={dismissRestoreUndoCard}
             onUndoRestoreData={undoRestoreData}
             onRestoreFileChange={restoreDataFromFile}
-            onUploadFileChange={mergeDataFromFile}
+            onProjectImportFileChange={importProjectFromFile}
           />
           <div
             ref={boardFrameRef}
             className="board-frame"
+            role="region"
+            aria-label={`${activeProject.name} board viewport`}
+            tabIndex={0}
             onDragEnterCapture={updateBoardDragPointer}
             onDragOverCapture={updateBoardDragPointer}
             onDragLeaveCapture={handleBoardDragLeave}
@@ -2079,7 +2534,6 @@ export default function App() {
                 draggedAccentIndex={draggedTaskAccentIndex}
                 highlightedTaskId={highlightedTaskId}
                 uploadedTaskIdSet={uploadedTaskIdSet}
-                copyTaskCount={tasksByBucket.get(null)?.length ?? 0}
                 isWarpHighlight={highlightedTaskBucketId === null}
                 onCopyBucketTasks={copyBucketTasksToClipboard}
                 onCopyTask={copyTaskToClipboard}
@@ -2090,8 +2544,10 @@ export default function App() {
                 onToggleTaskPin={(taskId) => dispatchPlanner({ type: 'TOGGLE_TASK_PIN', projectId: effectiveActiveProjectId, taskId, updatedAt: now() })}
                 onMoveTask={(taskId, bucketId, targetIndex) => moveTasksToBucket([taskId], bucketId, targetIndex)}
                 onMoveTasks={moveTasksToBucket}
-                selectedTaskIds={selectedTaskIdSet}
-                onSelectTask={handleTaskCardSelection}
+                selectedTaskIds={selectedTaskIds}
+                bucketSelectionState={getBucketTaskSelectionState(selectedTaskIds, orderedVisibleTasks, null)}
+                onTaskSelectionChange={setTaskSelection}
+                onBucketSelectionChange={(shouldSelect) => setBucketSelection(null, shouldSelect)}
                 onPasteIntoBucket={pasteTasksIntoBucket}
                 canPasteIntoBucket={taskClipboard.length > 0}
                 onDragStart={handleTaskDragStart}
@@ -2139,7 +2595,6 @@ export default function App() {
                     draggedAccentIndex={draggedTaskAccentIndex}
                     highlightedTaskId={highlightedTaskId}
                     uploadedTaskIdSet={uploadedTaskIdSet}
-                    copyTaskCount={tasksByBucket.get(bucket.id)?.length ?? 0}
                     registerColumnRef={registerBucketElement}
                     isWarpHighlight={highlightedBucketId === bucket.id || highlightedTaskBucketId === bucket.id}
                     onCopyBucketTasks={copyBucketTasksToClipboard}
@@ -2151,8 +2606,10 @@ export default function App() {
                     onToggleTaskPin={(taskId) => dispatchPlanner({ type: 'TOGGLE_TASK_PIN', projectId: effectiveActiveProjectId, taskId, updatedAt: now() })}
                     onMoveTask={(taskId, bucketId, targetIndex) => moveTasksToBucket([taskId], bucketId, targetIndex)}
                     onMoveTasks={moveTasksToBucket}
-                    selectedTaskIds={selectedTaskIdSet}
-                    onSelectTask={handleTaskCardSelection}
+                    selectedTaskIds={selectedTaskIds}
+                    bucketSelectionState={getBucketTaskSelectionState(selectedTaskIds, orderedVisibleTasks, bucket.id)}
+                    onTaskSelectionChange={setTaskSelection}
+                    onBucketSelectionChange={(shouldSelect) => setBucketSelection(bucket.id, shouldSelect)}
                     onPasteIntoBucket={pasteTasksIntoBucket}
                     canPasteIntoBucket={taskClipboard.length > 0}
                     onDragStart={handleTaskDragStart}

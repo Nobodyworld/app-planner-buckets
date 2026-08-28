@@ -154,6 +154,149 @@ describe('plannerReducerV2', () => {
     expect(next.projects.map((item) => item.id)).toContain('project-c');
   });
 
+  it('applies a complete Quick Add plan atomically without changing schema v2', () => {
+    const state = baseState();
+    const next = plannerReducerV2(state, {
+      type: 'APPLY_QUICK_ADD',
+      addition: {
+        project: project('project-quick', '  Quick Project  '),
+        bucket: bucket('bucket-quick', 'project-quick', '  Quick Bucket  '),
+        task: {
+          ...task('task-quick', 'project-quick', 'bucket-quick'),
+          title: '  Quick Task  ',
+        },
+      },
+    });
+
+    expect(next.version).toBe(PLANNER_DATA_V2_VERSION);
+    expect(next.projects.find((item) => item.id === 'project-quick')?.name).toBe('Quick Project');
+    expect(next.buckets.find((item) => item.id === 'bucket-quick')).toMatchObject({
+      projectId: 'project-quick',
+      name: 'Quick Bucket',
+    });
+    expect(next.tasks.find((item) => item.id === 'task-quick')).toMatchObject({
+      projectId: 'project-quick',
+      bucketId: 'bucket-quick',
+      title: 'Quick Task',
+    });
+  });
+
+  it('supports project-only, bucket-only, and task-only Quick Add plans', () => {
+    const state = baseState();
+    const projectOnly = plannerReducerV2(state, {
+      type: 'APPLY_QUICK_ADD',
+      addition: { project: project('project-quick', 'Quick Project') },
+    });
+    const bucketOnly = plannerReducerV2(state, {
+      type: 'APPLY_QUICK_ADD',
+      addition: { bucket: bucket('bucket-quick', 'project-a', 'Quick Bucket') },
+    });
+    const taskOnly = plannerReducerV2(state, {
+      type: 'APPLY_QUICK_ADD',
+      addition: { task: task('task-quick', 'project-a', 'bucket-a') },
+    });
+
+    expect(projectOnly.projects.some((item) => item.id === 'project-quick')).toBe(true);
+    expect(bucketOnly.buckets.some((item) => item.id === 'bucket-quick')).toBe(true);
+    expect(taskOnly.tasks.some((item) => item.id === 'task-quick')).toBe(true);
+  });
+
+  it('rejects an invalid Quick Add plan atomically without partial entities', () => {
+    const state = baseState();
+    const next = plannerReducerV2(state, {
+      type: 'APPLY_QUICK_ADD',
+      addition: {
+        project: project('project-quick', 'Quick Project'),
+        bucket: bucket('bucket-quick', 'project-a', 'Wrong Project'),
+      },
+    });
+
+    expect(next).toBe(state);
+    expect(next.projects.some((item) => item.id === 'project-quick')).toBe(false);
+    expect(next.buckets.some((item) => item.id === 'bucket-quick')).toBe(false);
+  });
+
+  it('rejects Quick Add collisions and broken project or bucket references', () => {
+    const state = baseState();
+    const invalidActions: PlannerActionV2[] = [
+      {
+        type: 'APPLY_QUICK_ADD',
+        addition: { project: project('bucket-a', 'Collision') },
+      },
+      {
+        type: 'APPLY_QUICK_ADD',
+        addition: { bucket: bucket('bucket-quick', 'missing-project', 'Orphan') },
+      },
+      {
+        type: 'APPLY_QUICK_ADD',
+        addition: { task: task('task-quick', 'project-a', 'missing-bucket') },
+      },
+      {
+        type: 'APPLY_QUICK_ADD',
+        addition: { task: task('task-quick', 'project-a', 'bucket-b') },
+      },
+      {
+        type: 'APPLY_QUICK_ADD',
+        addition: {
+          project: project('same-id', 'Quick Project'),
+          bucket: bucket('same-id', 'same-id', 'Quick Bucket'),
+        },
+      },
+    ];
+
+    invalidActions.forEach((action) => {
+      expect(plannerReducerV2(state, action)).toBe(state);
+    });
+  });
+
+  it('records a complete Quick Add plan as exactly one history entry', () => {
+    const initialState = baseState();
+    const { result } = renderHook(() => usePlannerHistory<PlannerDataV2, PlannerActionV2>(initialState, plannerReducerV2));
+
+    act(() => {
+      result.current.dispatch({
+        type: 'APPLY_QUICK_ADD',
+        addition: {
+          project: project('project-quick', 'Quick Project'),
+          bucket: bucket('bucket-quick', 'project-quick', 'Quick Bucket'),
+          task: task('task-quick', 'project-quick', 'bucket-quick'),
+        },
+      });
+    });
+
+    expect(result.current.state.projects.some((item) => item.id === 'project-quick')).toBe(true);
+    expect(result.current.state.buckets.some((item) => item.id === 'bucket-quick')).toBe(true);
+    expect(result.current.state.tasks.some((item) => item.id === 'task-quick')).toBe(true);
+    expect(result.current.canUndo).toBe(true);
+
+    act(() => {
+      result.current.undo();
+    });
+
+    expect(result.current.state).toBe(initialState);
+    expect(result.current.canUndo).toBe(false);
+    expect(result.current.canRedo).toBe(true);
+  });
+
+  it('does not add history for an empty or invalid Quick Add plan', () => {
+    const initialState = baseState();
+    const { result } = renderHook(() => usePlannerHistory<PlannerDataV2, PlannerActionV2>(initialState, plannerReducerV2));
+
+    act(() => {
+      result.current.dispatch({ type: 'APPLY_QUICK_ADD', addition: {} });
+      result.current.dispatch({
+        type: 'APPLY_QUICK_ADD',
+        addition: {
+          project: project('project-quick', 'Quick Project'),
+          bucket: bucket('bucket-quick', 'project-a', 'Wrong Project'),
+        },
+      });
+    });
+
+    expect(result.current.state).toBe(initialState);
+    expect(result.current.canUndo).toBe(false);
+  });
+
   it('renames projects and updates descriptions', () => {
     const renamed = plannerReducerV2(baseState(), {
       type: 'RENAME_PROJECT',
@@ -449,6 +592,58 @@ describe('plannerReducerV2', () => {
 
     act(() => {
       result.current.dispatch({ type: 'ADD_TASK', task: task('project-a', 'project-a', 'bucket-a') });
+    });
+
+    expect(result.current.state).toBe(initialState);
+    expect(result.current.canUndo).toBe(false);
+  });
+
+  it('deletes only matching project task IDs for a paste-specific inverse', () => {
+    const state: PlannerDataV2 = {
+      ...baseState(),
+      projects: [
+        ...baseState().projects,
+        project('project-b', 'Other project'),
+      ],
+      tasks: [
+        task('existing-task', 'project-a', 'bucket-a'),
+        task('pasted-a', 'project-a', 'bucket-a'),
+        task('pasted-b', 'project-a', null),
+        task('pasted-a-other-project', 'project-b', null),
+      ],
+    };
+
+    const next = plannerReducerV2(state, {
+      type: 'DELETE_TASKS_EXACT',
+      projectId: 'project-a',
+      taskIds: ['pasted-a', 'pasted-b', 'already-missing', 'pasted-a'],
+    });
+
+    expect(next.tasks.map((item) => item.id)).toEqual([
+      'existing-task',
+      'pasted-a-other-project',
+    ]);
+    expect(next.projects).toBe(state.projects);
+    expect(next.buckets).toBe(state.buckets);
+  });
+
+  it('treats an empty or already-consumed paste inverse as a history no-op', () => {
+    const initialState = baseState();
+    const { result } = renderHook(() => (
+      usePlannerHistory<PlannerDataV2, PlannerActionV2>(initialState, plannerReducerV2)
+    ));
+
+    act(() => {
+      result.current.dispatch({
+        type: 'DELETE_TASKS_EXACT',
+        projectId: 'project-a',
+        taskIds: [],
+      });
+      result.current.dispatch({
+        type: 'DELETE_TASKS_EXACT',
+        projectId: 'project-a',
+        taskIds: ['missing-task'],
+      });
     });
 
     expect(result.current.state).toBe(initialState);

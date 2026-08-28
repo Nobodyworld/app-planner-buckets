@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from 'react';
+import { useEffect, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import type { BucketTaskSelectionState } from '../services/plannerSelection';
 import type { BucketV2 as Bucket, PlannerTaskV2 as PlannerTask } from '../types/v2';
+import { BucketPinButton, BucketSelectionCheckbox } from './SelectionControls';
 import { TaskCard } from './TaskCard';
 
 interface BucketColumnProps {
@@ -30,7 +32,9 @@ interface BucketColumnProps {
     onDragStart: (taskId: string, taskIds: string[]) => void;
     onDragEnd: () => void;
     selectedTaskIds?: ReadonlySet<string>;
-    onSelectTask?: (taskId: string, event: ReactMouseEvent<HTMLElement>) => void;
+    bucketSelectionState?: BucketTaskSelectionState;
+    onTaskSelectionChange?: (taskId: string, selected: boolean) => void;
+    onBucketSelectionChange?: (selected: boolean) => void;
     onPasteIntoBucket?: (bucketId: string | null) => void;
     canPasteIntoBucket?: boolean;
     onBucketDragStart?: (bucketId: string) => void;
@@ -42,7 +46,6 @@ interface BucketColumnProps {
     canMoveBucketLeft?: boolean;
     canMoveBucketRight?: boolean;
     onBucketDropSettleEnd?: () => void;
-    copyTaskCount?: number;
     onToggleBucketPin?: (bucket: Bucket) => void;
     onRenameBucket?: (bucket: Bucket) => void;
     onDeleteBucket?: (bucket: Bucket) => void;
@@ -84,7 +87,9 @@ export function BucketColumn({
     onDragStart,
     onDragEnd,
     selectedTaskIds,
-    onSelectTask,
+    bucketSelectionState = 'unchecked',
+    onTaskSelectionChange,
+    onBucketSelectionChange,
     onPasteIntoBucket,
     canPasteIntoBucket = false,
     onBucketDragStart,
@@ -96,7 +101,6 @@ export function BucketColumn({
     canMoveBucketLeft = false,
     canMoveBucketRight = false,
     onBucketDropSettleEnd,
-    copyTaskCount = tasks.length,
     onToggleBucketPin,
     onRenameBucket,
     onDeleteBucket,
@@ -310,95 +314,149 @@ export function BucketColumn({
                     <h2>{bucketLabel}</h2>
                     <span>{tasks.length} task{tasks.length === 1 ? '' : 's'}</span>
                 </div>
-                {(onCopyBucketTasks || bucket) && (
+                {(onCopyBucketTasks || onPasteIntoBucket || onBucketSelectionChange || bucket) && (
                     <div className="bucket-actions">
-                        {onCopyBucketTasks && (
-                            <button
-                                type="button"
-                                className="icon-button copy-button"
-                                onClick={() => onCopyBucketTasks(bucketId)}
-                                disabled={copyTaskCount === 0}
-                                title={copyTaskCount === 0 ? `No tasks to copy from ${bucketLabel}` : `Copy all tasks in ${bucketLabel}`}
-                                aria-label={copyTaskCount === 0 ? `No tasks to copy from ${bucketLabel}` : `Copy all tasks in ${bucketLabel}`}
-                            >
-                                ⧉
-                            </button>
-                        )}
-                        {onPasteIntoBucket && (
-                            <button
-                                type="button"
-                                className="icon-button"
-                                onClick={() => onPasteIntoBucket(bucketId)}
-                                disabled={!canPasteIntoBucket}
-                                title={canPasteIntoBucket ? `Paste tasks into ${bucketLabel}` : 'Copy tasks first to paste'}
-                                aria-label={canPasteIntoBucket ? `Paste tasks into ${bucketLabel}` : 'Copy tasks first to paste'}
-                            >
-                                ⎘
-                            </button>
-                        )}
-                        {bucket && (
-                            <>
-                                <span
+                        <div
+                            className="bucket-action-row bucket-action-row-primary"
+                            role="group"
+                            aria-label={`${bucketLabel} copy, paste, and move actions`}
+                        >
+                            {onCopyBucketTasks && (
+                                <button
+                                    type="button"
+                                    className="icon-button copy-button"
+                                    onClick={() => onCopyBucketTasks(bucketId)}
+                                    title={`Copy ${bucketLabel} as JSON`}
+                                    aria-label={`Copy ${bucketLabel} as JSON`}
+                                >
+                                    ⧉
+                                </button>
+                            )}
+                            {onPasteIntoBucket && (
+                                <button
+                                    type="button"
+                                    className="icon-button"
+                                    onClick={() => onPasteIntoBucket(bucketId)}
+                                    disabled={!canPasteIntoBucket}
+                                    title={canPasteIntoBucket ? `Paste tasks into ${bucketLabel}` : 'Copy tasks first to paste'}
+                                    aria-label={canPasteIntoBucket ? `Paste tasks into ${bucketLabel}` : 'Copy tasks first to paste'}
+                                >
+                                    ⎘
+                                </button>
+                            )}
+                            {bucket && (
+                                <>
+                                    <button
+                                        type="button"
+                                        className="icon-button bucket-move-button"
+                                        onClick={() => onMoveBucketByOffset?.(bucket.id, -1)}
+                                        disabled={!canMoveBucketLeft}
+                                        title="Move bucket left"
+                                        aria-label="Move bucket left"
+                                    >
+                                        ←
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="icon-button bucket-move-button"
+                                        onClick={() => onMoveBucketByOffset?.(bucket.id, 1)}
+                                        disabled={!canMoveBucketRight}
+                                        title="Move bucket right"
+                                        aria-label="Move bucket right"
+                                    >
+                                        →
+                                    </button>
+                                </>
+                            )}
+                        </div>
+                        <div
+                            className="bucket-action-row bucket-action-row-secondary"
+                            role="group"
+                            aria-label={`${bucketLabel} bucket actions`}
+                        >
+                            {bucket && (
+                                <button
+                                    type="button"
                                     className="icon-button interaction-drag-handle drag-handle bucket-drag-handle"
                                     draggable
                                     onDragStart={startBucketDrag}
                                     onDragEnd={endBucketDrag}
-                                    title="Drag to move bucket"
+                                    onKeyDown={(event) => {
+                                        if (event.key === 'ArrowLeft' && canMoveBucketLeft) {
+                                            event.preventDefault();
+                                            onMoveBucketByOffset?.(bucket.id, -1);
+                                        }
+                                        if (event.key === 'ArrowRight' && canMoveBucketRight) {
+                                            event.preventDefault();
+                                            onMoveBucketByOffset?.(bucket.id, 1);
+                                        }
+                                    }}
+                                    onClick={(event) => {
+                                        if (event.detail !== 0) return;
+                                        if (canMoveBucketRight) {
+                                            onMoveBucketByOffset?.(bucket.id, 1);
+                                        } else if (canMoveBucketLeft) {
+                                            onMoveBucketByOffset?.(bucket.id, -1);
+                                        }
+                                    }}
+                                    title="Drag to move bucket; use Left and Right Arrow keys to reorder"
                                     aria-label="Drag to move bucket"
-                                    role="img"
-                                    tabIndex={0}
+                                    aria-keyshortcuts="ArrowLeft ArrowRight"
                                 >
                                     ⠿
-                                </span>
-                                <button
-                                    type="button"
-                                    className="icon-button bucket-move-button"
-                                    onClick={() => bucket && onMoveBucketByOffset?.(bucket.id, -1)}
-                                    disabled={!canMoveBucketLeft}
-                                    title="Move bucket left"
-                                    aria-label="Move bucket left"
-                                >
-                                    ←
                                 </button>
-                                <button
-                                    type="button"
-                                    className="icon-button bucket-move-button"
-                                    onClick={() => bucket && onMoveBucketByOffset?.(bucket.id, 1)}
-                                    disabled={!canMoveBucketRight}
-                                    title="Move bucket right"
-                                    aria-label="Move bucket right"
-                                >
-                                    →
-                                </button>
-                                <button
-                                    type="button"
-                                    className={`icon-button${bucket.pinned ? ' is-pinned' : ''}`}
-                                    onClick={() => onToggleBucketPin?.(bucket)}
-                                    title={bucket.pinned ? 'Unpin bucket' : 'Pin bucket to left group'}
-                                    aria-label={bucket.pinned ? 'Unpin bucket' : 'Pin bucket to left group'}
-                                >
-                                    {bucket.pinned ? '📌' : '◯'}
-                                </button>
-                                <button
-                                    type="button"
-                                    className="icon-button"
-                                    onClick={() => onRenameBucket?.(bucket)}
-                                    title="Rename bucket"
-                                    aria-label="Rename bucket"
-                                >
-                                    ✎
-                                </button>
-                                <button
-                                    type="button"
-                                    className="icon-button danger"
-                                    onClick={() => onDeleteBucket?.(bucket)}
-                                    title="Delete bucket"
-                                    aria-label="Delete bucket"
-                                >
-                                    ×
-                                </button>
-                            </>
-                        )}
+                            )}
+                            {onBucketSelectionChange && (
+                                <BucketSelectionCheckbox
+                                    bucketName={bucket?.name ?? null}
+                                    state={bucketSelectionState}
+                                    onChange={onBucketSelectionChange}
+                                    disabled={tasks.length === 0}
+                                />
+                            )}
+                            {bucket && (
+                                <>
+                                    <BucketPinButton
+                                        bucketName={bucket.name}
+                                        pinned={bucket.pinned}
+                                        onToggle={() => onToggleBucketPin?.(bucket)}
+                                    />
+                                    <button
+                                        type="button"
+                                        className="icon-button"
+                                        onClick={() => onRenameBucket?.(bucket)}
+                                        title="Rename bucket"
+                                        aria-label="Rename bucket"
+                                    >
+                                        ✎
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className="icon-button danger"
+                                        onClick={() => onDeleteBucket?.(bucket)}
+                                        title="Delete bucket"
+                                        aria-label="Delete bucket"
+                                    >
+                                        <svg
+                                            className="bucket-delete-icon"
+                                            viewBox="0 0 24 24"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="1.8"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                            aria-hidden="true"
+                                            focusable="false"
+                                        >
+                                            <path d="M4 7h16" />
+                                            <path d="M9 7V4h6v3" />
+                                            <path d="m6.5 7 1 13h9l1-13" />
+                                            <path d="M10 11v5M14 11v5" />
+                                        </svg>
+                                    </button>
+                                </>
+                            )}
+                        </div>
                     </div>
                 )}
             </header>
@@ -438,7 +496,9 @@ export function BucketColumn({
                             canMoveDown={index < tasks.length - 1}
                             onCopy={onCopyTask ? () => onCopyTask(task, bucketLabel) : undefined}
                             isSelected={selectedTaskIds?.has(task.id) ?? false}
-                            onCardClick={onSelectTask ? (event) => onSelectTask(task.id, event) : undefined}
+                            onSelectionChange={onTaskSelectionChange
+                                ? (selected) => onTaskSelectionChange(task.id, selected)
+                                : undefined}
                             onCardDragOver={(event) => {
                                 if (isBucketDragActive) return;
                                 event.preventDefault();

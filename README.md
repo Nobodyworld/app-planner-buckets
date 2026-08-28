@@ -4,6 +4,10 @@ Local-first planning board for projects, buckets, and tasks.
 
 Planner Buckets runs fully in your browser with no backend required, while still supporting practical workflows like templates, archived-task handling, import/export, and undo/redo.
 
+See [Project-native workspace workflows](docs/PROJECT_NATIVE_WORKSPACE.md) for
+board navigation, Quick Add, explicit selection, copy/export/import, Restore
+recovery, paste Undo, and the synthetic physical-acceptance checklist.
+
 ## Delivery modes
 
 Planner Buckets is keeping the existing browser application while adding an installable Windows desktop application.
@@ -27,7 +31,14 @@ The Windows desktop shell is implemented in [#39](https://github.com/Nobodyworld
 - Durable application-data files and automatic backups are scoped to [#40](https://github.com/Nobodyworld/app-planner-buckets/issues/40).
 - Signed updates and release publishing are scoped to [#41](https://github.com/Nobodyworld/app-planner-buckets/issues/41).
 
-Continue exporting JSON backups. To migrate data from the browser, choose **Export All Data** in the browser application, then **Restore** that JSON in the desktop application. See [Desktop distribution](docs/DESKTOP.md) for prerequisites, installation, and current limitations.
+Continue exporting JSON backups. To migrate data from the browser, choose the
+**All data** export scope in the browser application, export the JSON, and then
+**Restore** that raw full-planner file in the desktop application. Newly
+generated Project, Bucket, and Unassigned exports use a versioned scope tag and
+are exchange files rather than full backups; Restore refuses them and directs
+you to **Import project JSON**. Legacy raw v1/v2 backups remain compatible. See
+[Desktop distribution](docs/DESKTOP.md) for prerequisites, installation, and
+current limitations.
 
 ## Why this exists
 
@@ -42,8 +53,9 @@ Most lightweight planning apps are either too minimal for real work or too depen
 Planner data is stored in your browser localStorage.
 
 - Data stays on your machine unless you explicitly export and share JSON
-- Upload and restore are user-triggered actions only
-- Clipboard actions copy task text only when you trigger them
+- Import, export, and Restore are user-triggered actions only
+- Clipboard actions write task text, project Markdown, or bucket JSON only when
+  you trigger them
 - Local data is not encrypted by the app; do not store secrets, credentials, or sensitive private records in task text
 
 If you clear site storage, local data is removed. Use Export JSON for backups.
@@ -66,13 +78,19 @@ Project and board management:
 - Bucket columns with drag-and-drop bucket reordering
 - Permanent Unassigned lane for unbucketed tasks
 - Pin buckets into the left group for stable triage workflows
+- Two-axis board navigation with persistent 70%-110% zoom
+- Quick Add targeting an existing or new project and bucket; Enter submits from
+  Task title, Bucket, or Project, Tab accepts an applicable suggestion and moves
+  forward, Shift+Tab moves backward without submitting, Up/Down Arrow navigate
+  suggestions, Escape closes them, and Add performs the same submission
 
 Task workflow:
 
 - Create, edit, delete, pin, and complete tasks
 - Drag-and-drop task ordering within and across buckets
-- Multi-select with Ctrl/Cmd and Shift range selection
-- Copy selected tasks and paste into target buckets
+- Explicit task and whole-bucket selection, separate from completion
+- Copy selected tasks and paste into target buckets with a latest-batch
+  Keep/Undo notice
 - Search by task title and description
 
 Template workflow:
@@ -83,9 +101,16 @@ Template workflow:
 
 Data and safety controls:
 
-- JSON export with scoped export options
-- JSON upload merge flow with identity remapping
-- JSON restore with confirmation safeguards
+- Readable project Markdown and structured bucket JSON copy
+- Raw All-data backups plus scope-tagged Project, Bucket, and Unassigned JSON
+  exchange exports
+- Explicit source and new/existing destination choices for project import
+- Frozen, one-to-one import reuse that preserves duplicate-named source
+  templates, definitions, buckets, and task mappings
+- Task import skips only exact semantic duplicates, including task state and
+  normalized resource tags
+- Full-planner Restore with confirmation, a pre-replacement recovery snapshot,
+  operation-specific Undo, and scoped-exchange rejection
 - Undo/redo history around reducer actions
 
 UX controls:
@@ -154,7 +179,7 @@ flowchart LR
    History --> Reducer[plannerReducer v2]
    Reducer --> State[PlannerDataV2]
    State --> Persist[plannerPersistence localStorage v2]
-   Persist --> ImportExport[JSON Export Upload Restore]
+   Persist --> ImportExport[Scoped Export Project Import Full Restore]
    ImportExport --> Validation[Schema and integrity validators]
    Validation --> State
 ```
@@ -174,8 +199,16 @@ The desktop shell currently retains the browser persistence implementation in it
 - `src/services/plannerPersistence.ts`: v1/v2 loading, migration, and browser persistence
 - `src/types/v2.ts`: v2 schema contracts
 - `src/types/validators.ts`: structural and relational validation rules
+- `src/services/plannerExchange.ts`: deterministic project Markdown and bucket
+  JSON copy formats
+- `src/services/plannerExport.ts`: scoped payloads, project envelopes, and
+  filenames
+- `src/services/plannerProjectImport.ts`: explicit source/destination project
+  import planning
 - `src/components/`: board and editor UI components
 - `docs/DESKTOP.md`: desktop distribution, persistence, update, and validation contract
+- `docs/PROJECT_NATIVE_WORKSPACE.md`: project-native workflow and acceptance
+  guide
 
 `PLAN.md` and `PLAN_V2.md` are retained as historical design records. Current source, tests, and this README are authoritative when an older plan differs from the implementation.
 

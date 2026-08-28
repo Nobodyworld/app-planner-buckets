@@ -4,6 +4,7 @@ import type { Project } from '../types/v2';
 interface ProjectListProps {
   projects: Project[];
   activeProjectId: string;
+  embedded?: boolean;
   onSelectProject: (projectId: string) => void;
   onCreateProject: (name: string) => void;
   onRenameProject: (projectId: string, name: string) => void;
@@ -16,6 +17,7 @@ interface ProjectListProps {
 export function ProjectList({
   projects,
   activeProjectId,
+  embedded = false,
   onSelectProject,
   onCreateProject,
   onRenameProject,
@@ -59,13 +61,19 @@ export function ProjectList({
   };
 
   if (!activeProject) return null;
+  const Wrapper = embedded ? 'div' : 'section';
 
   return (
-    <section className="project-list panel-card" aria-label="Projects">
-      <div className="project-list-header">
-        <h2>Projects</h2>
-        <span className="toolbar-meta">{projects.length}</span>
-      </div>
+    <Wrapper
+      className={`project-list${embedded ? '' : ' panel-card'}`}
+      aria-label={embedded ? undefined : 'Projects'}
+    >
+      {!embedded ? (
+        <div className="project-list-header">
+          <h2>Projects</h2>
+          <span className="toolbar-meta">{projects.length}</span>
+        </div>
+      ) : null}
 
       <p className="section-helper">Choose an active project for the board view.</p>
 
@@ -159,6 +167,6 @@ export function ProjectList({
           />
         </div>
       </details>
-    </section>
+    </Wrapper>
   );
 }

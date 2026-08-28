@@ -5,6 +5,7 @@ import type { BucketTemplate, BucketTemplateDefinition } from '../types/v2';
 interface TemplateLibraryProps {
   templates: BucketTemplate[];
   definitions: BucketTemplateDefinition[];
+  embedded?: boolean;
   selectedTemplateId: string | null;
   activeProjectName: string;
   message: string | null;
@@ -28,6 +29,7 @@ interface TemplateLibraryProps {
 export function TemplateLibrary({
   templates,
   definitions,
+  embedded = false,
   selectedTemplateId,
   activeProjectName,
   message,
@@ -121,12 +123,19 @@ export function TemplateLibrary({
     }));
   };
 
+  const Wrapper = embedded ? 'div' : 'section';
+
   return (
-    <section className="template-library panel-card" aria-label="Template Library">
-      <div className="template-library-header">
-        <h2>Templates</h2>
-        <span className="toolbar-meta">{templates.length}</span>
-      </div>
+    <Wrapper
+      className={`template-library${embedded ? '' : ' panel-card'}`}
+      aria-label={embedded ? undefined : 'Template Library'}
+    >
+      {!embedded ? (
+        <div className="template-library-header">
+          <h2>Templates</h2>
+          <span className="toolbar-meta">{templates.length}</span>
+        </div>
+      ) : null}
 
       <p className="section-helper">Choose and apply templates without opening advanced definition editors.</p>
 
@@ -306,6 +315,6 @@ export function TemplateLibrary({
           )}
         </div>
       </details>
-    </section>
+    </Wrapper>
   );
 }

@@ -1,101 +1,160 @@
-import type { KeyboardEvent, RefObject } from 'react';
-import type { BucketV2 as Bucket } from '../../types/v2';
+import { useMemo, useRef, type RefObject } from 'react';
+import {
+    QuickAddCombobox,
+    type QuickAddComboboxOption,
+} from '../QuickAddCombobox';
+import type { BucketV2 as Bucket, Project } from '../../types/v2';
+
+interface QuickAddTargetOverride {
+    bucketName?: string;
+    selectedBucketId?: string | null;
+    projectName?: string;
+    selectedProjectId?: string | null;
+}
 
 export interface QuickTaskPanelProps {
     shellRef: RefObject<HTMLDivElement>;
     taskInputRef: RefObject<HTMLInputElement>;
+    projectInputRef: RefObject<HTMLInputElement>;
     bucketInputRef: RefObject<HTMLInputElement>;
-    isOpen: boolean;
     title: string;
+    projectName: string;
+    selectedProjectId: string | null;
     bucketName: string;
-    bucketSuggestionSuffix: string;
-    activeBuckets: Bucket[];
-    bucketIdByNormalizedName: ReadonlyMap<string, string>;
-    normalizeBucketName: (name: string) => string;
+    selectedBucketId: string | null;
+    projects: Project[];
+    projectBuckets: Bucket[];
+    message: string | null;
     onTitleChange: (value: string) => void;
+    onProjectNameChange: (value: string) => void;
+    onProjectSelectionChange: (projectId: string | null) => void;
     onBucketNameChange: (value: string) => void;
-    onBucketIdChange: (bucketId: string | null) => void;
-    onTitleKeyDown: (event: KeyboardEvent<HTMLInputElement>) => void;
-    onBucketKeyDown: (event: KeyboardEvent<HTMLInputElement>) => void;
-    onSubmit: () => void;
+    onBucketSelectionChange: (bucketId: string | null) => void;
+    onSubmit: (override?: QuickAddTargetOverride) => void;
 }
+
+const normalizeOptionLabel = (label: string): string => label.trim().toLocaleLowerCase();
+
+const buildOptions = (
+    items: Array<{ id: string; name: string }>,
+    entityLabel: string,
+): QuickAddComboboxOption[] => {
+    const counts = new Map<string, number>();
+    items.forEach((item) => {
+        const normalized = normalizeOptionLabel(item.name);
+        counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+    });
+
+    const ordinals = new Map<string, number>();
+    return items.map((item) => {
+        const normalized = normalizeOptionLabel(item.name);
+        const count = counts.get(normalized) ?? 1;
+        const ordinal = (ordinals.get(normalized) ?? 0) + 1;
+        ordinals.set(normalized, ordinal);
+        return {
+            id: item.id,
+            label: item.name,
+            description: count > 1 ? `${entityLabel} ${ordinal} of ${count} with this name` : undefined,
+        };
+    });
+};
 
 export function QuickTaskPanel({
     shellRef,
     taskInputRef,
+    projectInputRef,
     bucketInputRef,
-    isOpen,
     title,
+    projectName,
+    selectedProjectId,
     bucketName,
-    bucketSuggestionSuffix,
-    activeBuckets,
-    bucketIdByNormalizedName,
-    normalizeBucketName,
+    selectedBucketId,
+    projects,
+    projectBuckets,
+    message,
     onTitleChange,
+    onProjectNameChange,
+    onProjectSelectionChange,
     onBucketNameChange,
-    onBucketIdChange,
-    onTitleKeyDown,
-    onBucketKeyDown,
+    onBucketSelectionChange,
     onSubmit,
 }: QuickTaskPanelProps) {
+    const projectOptions = useMemo(() => buildOptions(projects, 'Project'), [projects]);
+    const bucketOptions = useMemo(() => buildOptions(projectBuckets, 'Bucket'), [projectBuckets]);
+    const onSubmitRef = useRef(onSubmit);
+    onSubmitRef.current = onSubmit;
+
     return (
-        <section className="panel-card" aria-label="Quick add tasks">
+        <section className="panel-card" aria-label="Quick add">
             <h2>Quick Add</h2>
-            <div ref={shellRef} className={`quick-task-shell interaction-scroll-target${isOpen ? ' open' : ''}`}>
-                {isOpen && (
-                    <div className="quick-task-fields interaction-enter">
-                        <div className="quick-task-input-stack">
-                            <input
-                                ref={taskInputRef}
-                                className="quick-task-input"
-                                value={title}
-                                onChange={(event) => onTitleChange(event.target.value)}
-                                onKeyDown={onTitleKeyDown}
-                                placeholder="Task title"
-                                maxLength={160}
-                                aria-label="Quick add task title"
-                            />
-                            <div className="quick-task-bucket-field">
-                                {bucketSuggestionSuffix && (
-                                    <span className="quick-task-bucket-ghost" aria-hidden="true">
-                                        <span className="quick-task-bucket-ghost-typed">{bucketName.trim()}</span>
-                                        <span className="quick-task-bucket-ghost-suffix">{bucketSuggestionSuffix}</span>
-                                    </span>
-                                )}
-                                <input
-                                    ref={bucketInputRef}
-                                    className="quick-task-bucket-input"
-                                    value={bucketName}
-                                    onChange={(event) => {
-                                        const value = event.target.value;
-                                        onBucketNameChange(value);
-                                        const existingBucketId = bucketIdByNormalizedName.get(normalizeBucketName(value)) ?? null;
-                                        onBucketIdChange(existingBucketId);
-                                    }}
-                                    onKeyDown={onBucketKeyDown}
-                                    placeholder="Bucket (optional)"
-                                    maxLength={80}
-                                    list="quick-task-bucket-options"
-                                    title="Autocomplete available. Press Right Arrow to accept suggestion."
-                                    aria-label="Quick add bucket name"
-                                />
-                            </div>
-                            <datalist id="quick-task-bucket-options">
-                                {activeBuckets.map((bucket) => (
-                                    <option key={bucket.id} value={bucket.name} />
-                                ))}
-                            </datalist>
-                        </div>
-                        <button
-                            type="button"
-                            className="secondary-button"
-                            onClick={onSubmit}
-                            disabled={!title.trim()}
-                        >
-                            Add task
-                        </button>
+            <div ref={shellRef} className="quick-task-shell interaction-scroll-target open">
+                <form
+                    className="quick-task-fields"
+                    onSubmit={(event) => {
+                        event.preventDefault();
+                        onSubmitRef.current();
+                    }}
+                >
+                    <div className="quick-task-input-stack">
+                        <label className="quick-add-field-label" htmlFor="quick-add-task-title">
+                            Task title
+                        </label>
+                        <input
+                            ref={taskInputRef}
+                            id="quick-add-task-title"
+                            className="quick-task-input"
+                            value={title}
+                            onChange={(event) => onTitleChange(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === 'Enter' && event.nativeEvent.isComposing) {
+                                    event.preventDefault();
+                                }
+                            }}
+                            placeholder="Optional when creating only a project or bucket"
+                            maxLength={160}
+                        />
+                        <QuickAddCombobox
+                            inputRef={bucketInputRef}
+                            label="Bucket"
+                            value={bucketName}
+                            selectedId={selectedBucketId}
+                            options={bucketOptions}
+                            placeholder="Unassigned"
+                            onValueChange={onBucketNameChange}
+                            onSelectionChange={(option) => onBucketSelectionChange(option?.id ?? null)}
+                            onEnter={(acceptedOption) => onSubmitRef.current(acceptedOption
+                                ? {
+                                    bucketName: acceptedOption.label,
+                                    selectedBucketId: acceptedOption.id,
+                                }
+                                : undefined)}
+                        />
+                        <QuickAddCombobox
+                            inputRef={projectInputRef}
+                            label="Project"
+                            value={projectName}
+                            selectedId={selectedProjectId}
+                            options={projectOptions}
+                            placeholder="Current project"
+                            onValueChange={onProjectNameChange}
+                            onSelectionChange={(option) => onProjectSelectionChange(option?.id ?? null)}
+                            onEnter={(acceptedOption) => onSubmitRef.current(acceptedOption
+                                ? {
+                                    projectName: acceptedOption.label,
+                                    selectedProjectId: acceptedOption.id,
+                                }
+                                : undefined)}
+                        />
                     </div>
-                )}
+                    <button type="submit" className="secondary-button">
+                        Add
+                    </button>
+                    {message ? (
+                        <p className="quick-add-message" role="status" aria-live="polite">
+                            {message}
+                        </p>
+                    ) : null}
+                </form>
             </div>
         </section>
     );
