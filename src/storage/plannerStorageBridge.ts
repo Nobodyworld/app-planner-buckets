@@ -1,3 +1,4 @@
+import { fingerprintPlannerData } from '../services/restoreRecovery';
 import type { PlannerDataV2 } from '../types/v2';
 
 export interface RuntimeStorageStatus {
@@ -33,6 +34,7 @@ let bootstrapSeed: RuntimeBootstrapSeed | null = null;
 let saveTarget: RuntimeSaveTarget | null = null;
 let currentPlannerData: PlannerDataV2 | null = null;
 let pendingRestoreData: PlannerDataV2 | null = null;
+let preparedRestoreReplacementFingerprint: string | null = null;
 
 const mergeBootstrapWarning = (
   status: RuntimeStorageStatus,
@@ -46,10 +48,14 @@ export const registerPlannerStorageRuntimeBridge = (
   target: RuntimeSaveTarget,
   data: PlannerDataV2,
   warning: string | null,
+  hasRestoreRecovery = false,
 ): void => {
   bootstrapSeed = { data, warning };
   currentPlannerData = data;
   pendingRestoreData = null;
+  preparedRestoreReplacementFingerprint = hasRestoreRecovery
+    ? fingerprintPlannerData(data)
+    : null;
   saveTarget = {
     mode: target.mode,
     getStatus: () => mergeBootstrapWarning(target.getStatus(), warning),
@@ -94,20 +100,42 @@ export const preparePlannerRestoreRecovery = async (): Promise<boolean> => {
     return false;
   }
 
-  return saveTarget.createRestoreRecovery(
+  const recoveryPrepared = await saveTarget.createRestoreRecovery(
     currentPlannerData,
     pendingRestoreData,
     new Date().toISOString(),
   );
+  if (recoveryPrepared) {
+    preparedRestoreReplacementFingerprint = fingerprintPlannerData(pendingRestoreData);
+  }
+  return recoveryPrepared;
 };
 
 export const clearPlannerRestoreRecoveryRuntime = async (): Promise<void> => {
   pendingRestoreData = null;
+  preparedRestoreReplacementFingerprint = null;
   if (
     saveTarget?.mode === 'desktop-file'
     && saveTarget.clearRestoreRecovery
   ) {
     await saveTarget.clearRestoreRecovery();
+  }
+};
+
+const retireDivergedRestoreRecovery = (data: PlannerDataV2): void => {
+  if (
+    !preparedRestoreReplacementFingerprint
+    || fingerprintPlannerData(data) === preparedRestoreReplacementFingerprint
+  ) {
+    return;
+  }
+
+  preparedRestoreReplacementFingerprint = null;
+  pendingRestoreData = null;
+  if (saveTarget?.clearRestoreRecovery) {
+    void saveTarget.clearRestoreRecovery().catch(() => {
+      // The adapter publishes durable cleanup failures through storage status.
+    });
   }
 };
 
@@ -119,6 +147,7 @@ export const forwardPlannerSaveToRuntime = (data: PlannerDataV2): boolean => {
   if (!saveTarget || saveTarget.mode !== 'desktop-file') return false;
 
   currentPlannerData = data;
+  retireDivergedRestoreRecovery(data);
   const status = saveTarget.getStatus();
   if (!status.writable) {
     throw new Error('Desktop planner storage is read-only; changes cannot be saved from this instance.');
@@ -136,4 +165,5 @@ export const resetPlannerStorageRuntimeBridgeForTests = (): void => {
   saveTarget = null;
   currentPlannerData = null;
   pendingRestoreData = null;
+  preparedRestoreReplacementFingerprint = null;
 };
