@@ -1,4 +1,10 @@
-import type { ChangeEvent, RefObject } from 'react';
+import { useState, type ChangeEvent, type RefObject } from 'react';
+import { coercePlannerDataToV2 } from '../../services/plannerImport';
+import {
+    clearPlannerRestoreRecoveryRuntime,
+    preparePlannerRestoreRecovery,
+    setPendingPlannerRestoreData,
+} from '../../storage/plannerStorageBridge';
 import type { BucketV2 as Bucket } from '../../types/v2';
 import { StorageStatusCard } from './StorageStatusCard';
 
@@ -94,6 +100,7 @@ export function DataPanel({
     onRestoreFileChange,
     onProjectImportFileChange,
 }: DataPanelProps) {
+    const [restorePreparationMessage, setRestorePreparationMessage] = useState<string | null>(null);
     const Wrapper = embedded ? 'div' : 'section';
     const selectedBucket = exportScope.startsWith('bucket:')
         ? activeBuckets.find((bucket) => bucket.id === exportScope.slice('bucket:'.length))
@@ -105,6 +112,66 @@ export function DataPanel({
             : selectedBucket
                 ? `Bucket: ${selectedBucket.name}`
                 : 'All data';
+
+    const handleRestoreFileSelection = async (
+        event: ChangeEvent<HTMLInputElement>,
+    ): Promise<void> => {
+        setRestorePreparationMessage(null);
+        setPendingPlannerRestoreData(null);
+        const file = event.target.files?.[0] ?? null;
+
+        if (file) {
+            try {
+                const parsed = JSON.parse(await file.text()) as unknown;
+                setPendingPlannerRestoreData(coercePlannerDataToV2(parsed).data);
+            } catch {
+                // The established App handler owns user-facing validation errors.
+            }
+        }
+
+        onRestoreFileChange(event);
+    };
+
+    const handleConfirmRestore = async (): Promise<void> => {
+        setRestorePreparationMessage(null);
+        const recoveryPrepared = await preparePlannerRestoreRecovery();
+        if (!recoveryPrepared) {
+            setRestorePreparationMessage(
+                'Restore was not started because a verified desktop recovery snapshot could not be created.',
+            );
+            return;
+        }
+
+        setPendingPlannerRestoreData(null);
+        onConfirmRestoreData();
+    };
+
+    const handleCancelRestore = (): void => {
+        setRestorePreparationMessage(null);
+        setPendingPlannerRestoreData(null);
+        onCancelRestoreData();
+    };
+
+    const clearDurableRestoreRecovery = (): void => {
+        void clearPlannerRestoreRecoveryRuntime().catch(() => {
+            // The storage status card reports durable cleanup failures.
+        });
+    };
+
+    const handleConfirmProjectImport = (): void => {
+        onConfirmProjectImport();
+        clearDurableRestoreRecovery();
+    };
+
+    const handleDismissRestoreUndo = (): void => {
+        onDismissRestoreUndoCard();
+        clearDurableRestoreRecovery();
+    };
+
+    const handleUndoRestore = (): void => {
+        onUndoRestoreData();
+        clearDurableRestoreRecovery();
+    };
 
     return (
         <Wrapper
@@ -282,7 +349,7 @@ export function DataPanel({
                             <button
                                 type="button"
                                 className="secondary-button"
-                                onClick={onConfirmProjectImport}
+                                onClick={handleConfirmProjectImport}
                                 aria-label="Confirm project import"
                                 disabled={!canConfirmProjectImport}
                             >
@@ -315,7 +382,9 @@ export function DataPanel({
                             <button
                                 type="button"
                                 className="icon-button inline-confirm-accept"
-                                onClick={onConfirmRestoreData}
+                                onClick={() => {
+                                    void handleConfirmRestore();
+                                }}
                                 aria-label="Confirm restore"
                                 title="Confirm restore"
                             >
@@ -324,7 +393,7 @@ export function DataPanel({
                             <button
                                 type="button"
                                 className="icon-button inline-confirm-cancel"
-                                onClick={onCancelRestoreData}
+                                onClick={handleCancelRestore}
                                 aria-label="Cancel restore"
                                 title="Cancel restore"
                             >
@@ -333,6 +402,12 @@ export function DataPanel({
                         </div>
                     </div>
                 )}
+
+                {restorePreparationMessage ? (
+                    <p className="data-message" role="alert">
+                        {restorePreparationMessage}
+                    </p>
+                ) : null}
 
                 {hasLastRestoreBackup && !hideRestoreUndoCard && (
                     <div
@@ -345,7 +420,7 @@ export function DataPanel({
                             <button
                                 type="button"
                                 className="icon-button restore-undo-close"
-                                onClick={onDismissRestoreUndoCard}
+                                onClick={handleDismissRestoreUndo}
                                 aria-label="Dismiss undo restore notice"
                                 title="Dismiss"
                             >
@@ -356,7 +431,7 @@ export function DataPanel({
                             <button
                                 type="button"
                                 className="secondary-button"
-                                onClick={onUndoRestoreData}
+                                onClick={handleUndoRestore}
                                 aria-label="Undo restore"
                             >
                                 Undo restore
@@ -378,7 +453,9 @@ export function DataPanel({
                 type="file"
                 accept="application/json,.json"
                 aria-label="Restore planner data from JSON"
-                onChange={onRestoreFileChange}
+                onChange={(event) => {
+                    void handleRestoreFileSelection(event);
+                }}
             />
             <input
                 ref={projectImportInputRef}
