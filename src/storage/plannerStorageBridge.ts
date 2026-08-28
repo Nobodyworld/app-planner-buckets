@@ -16,6 +16,12 @@ export interface RuntimeSaveTarget {
   getStatus: () => RuntimeStorageStatus;
   subscribe?: (listener: (status: RuntimeStorageStatus) => void) => () => void;
   save: (data: PlannerDataV2) => Promise<unknown>;
+  createRestoreRecovery?: (
+    previousData: PlannerDataV2,
+    replacementData: PlannerDataV2,
+    createdAt: string,
+  ) => Promise<boolean>;
+  clearRestoreRecovery?: () => Promise<void>;
 }
 
 interface RuntimeBootstrapSeed {
@@ -25,6 +31,8 @@ interface RuntimeBootstrapSeed {
 
 let bootstrapSeed: RuntimeBootstrapSeed | null = null;
 let saveTarget: RuntimeSaveTarget | null = null;
+let currentPlannerData: PlannerDataV2 | null = null;
+let pendingRestoreData: PlannerDataV2 | null = null;
 
 const mergeBootstrapWarning = (
   status: RuntimeStorageStatus,
@@ -40,6 +48,8 @@ export const registerPlannerStorageRuntimeBridge = (
   warning: string | null,
 ): void => {
   bootstrapSeed = { data, warning };
+  currentPlannerData = data;
+  pendingRestoreData = null;
   saveTarget = {
     mode: target.mode,
     getStatus: () => mergeBootstrapWarning(target.getStatus(), warning),
@@ -49,6 +59,16 @@ export const registerPlannerStorageRuntimeBridge = (
       }) ?? (() => undefined)
       : undefined,
     save: (nextData) => target.save(nextData),
+    createRestoreRecovery: target.createRestoreRecovery
+      ? (previousData, replacementData, createdAt) => target.createRestoreRecovery?.(
+        previousData,
+        replacementData,
+        createdAt,
+      ) ?? Promise.resolve(false)
+      : undefined,
+    clearRestoreRecovery: target.clearRestoreRecovery
+      ? () => target.clearRestoreRecovery?.() ?? Promise.resolve()
+      : undefined,
   };
 };
 
@@ -60,6 +80,37 @@ export const getPlannerStorageRuntimeBootstrap = (): RuntimeBootstrapSeed | null
 
 export const getPlannerStorageRuntimeTarget = (): RuntimeSaveTarget | null => saveTarget;
 
+export const setPendingPlannerRestoreData = (data: PlannerDataV2 | null): void => {
+  pendingRestoreData = data;
+};
+
+export const preparePlannerRestoreRecovery = async (): Promise<boolean> => {
+  if (!saveTarget || saveTarget.mode !== 'desktop-file') return true;
+  if (
+    !currentPlannerData
+    || !pendingRestoreData
+    || !saveTarget.createRestoreRecovery
+  ) {
+    return false;
+  }
+
+  return saveTarget.createRestoreRecovery(
+    currentPlannerData,
+    pendingRestoreData,
+    new Date().toISOString(),
+  );
+};
+
+export const clearPlannerRestoreRecoveryRuntime = async (): Promise<void> => {
+  pendingRestoreData = null;
+  if (
+    saveTarget?.mode === 'desktop-file'
+    && saveTarget.clearRestoreRecovery
+  ) {
+    await saveTarget.clearRestoreRecovery();
+  }
+};
+
 /**
  * Returns true when a desktop runtime accepted responsibility for this save.
  * Browser mode returns false so the caller preserves ordinary localStorage.
@@ -67,6 +118,7 @@ export const getPlannerStorageRuntimeTarget = (): RuntimeSaveTarget | null => sa
 export const forwardPlannerSaveToRuntime = (data: PlannerDataV2): boolean => {
   if (!saveTarget || saveTarget.mode !== 'desktop-file') return false;
 
+  currentPlannerData = data;
   const status = saveTarget.getStatus();
   if (!status.writable) {
     throw new Error('Desktop planner storage is read-only; changes cannot be saved from this instance.');
@@ -82,4 +134,6 @@ export const forwardPlannerSaveToRuntime = (data: PlannerDataV2): boolean => {
 export const resetPlannerStorageRuntimeBridgeForTests = (): void => {
   bootstrapSeed = null;
   saveTarget = null;
+  currentPlannerData = null;
+  pendingRestoreData = null;
 };
