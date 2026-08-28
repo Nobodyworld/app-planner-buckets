@@ -44,12 +44,10 @@ impl DesktopStoragePaths {
     }
 
     fn ensure_directories(&self) -> Result<(), String> {
-        fs::create_dir_all(&self.data_dir).map_err(|error| {
-            format!("Could not create the planner data directory: {error}")
-        })?;
-        fs::create_dir_all(&self.backup_dir).map_err(|error| {
-            format!("Could not create the planner backup directory: {error}")
-        })?;
+        fs::create_dir_all(&self.data_dir)
+            .map_err(|error| format!("Could not create the planner data directory: {error}"))?;
+        fs::create_dir_all(&self.backup_dir)
+            .map_err(|error| format!("Could not create the planner backup directory: {error}"))?;
         Ok(())
     }
 }
@@ -77,12 +75,11 @@ fn acquire_writer_guard() -> Result<Option<WriterGuard>, String> {
         System::Threading::CreateMutexW,
     };
 
-    let name: Vec<u16> = std::ffi::OsStr::new(
-        "Local\\com.nobodyworld.plannerbuckets.storage.writer",
-    )
-    .encode_wide()
-    .chain(iter::once(0))
-    .collect();
+    let name: Vec<u16> =
+        std::ffi::OsStr::new("Local\\com.nobodyworld.plannerbuckets.storage.writer")
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect();
 
     let handle = unsafe { CreateMutexW(ptr::null(), 1, name.as_ptr()) };
     if handle.is_null() {
@@ -126,9 +123,8 @@ fn acquire_writer_guard(paths: &DesktopStoragePaths) -> Result<Option<WriterGuar
             writeln!(file, "{}", process::id()).map_err(|error| {
                 format!("Could not initialize the planner writer lock: {error}")
             })?;
-            file.sync_all().map_err(|error| {
-                format!("Could not flush the planner writer lock: {error}")
-            })?;
+            file.sync_all()
+                .map_err(|error| format!("Could not flush the planner writer lock: {error}"))?;
             Ok(Some(WriterGuard { _file: file, path }))
         }
         Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(None),
@@ -186,9 +182,9 @@ impl DesktopStorageState {
     }
 
     fn lock_runtime(&self) -> Result<MutexGuard<'_, RuntimeState>, String> {
-        self.runtime
-            .lock()
-            .map_err(|_| "Desktop storage state is unavailable after an internal lock failure.".to_string())
+        self.runtime.lock().map_err(|_| {
+            "Desktop storage state is unavailable after an internal lock failure.".to_string()
+        })
     }
 
     fn ensure_writer(&self) -> Result<(), String> {
@@ -241,7 +237,10 @@ fn validate_planner_json(serialized: &str) -> Result<(), String> {
     if planner_json_is_defensively_valid(serialized) {
         Ok(())
     } else {
-        Err("Desktop storage rejected planner data that was not valid schema-version 2 JSON.".to_string())
+        Err(
+            "Desktop storage rejected planner data that was not valid schema-version 2 JSON."
+                .to_string(),
+        )
     }
 }
 
@@ -344,7 +343,11 @@ fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
-fn replace_text_recoverably(destination: &Path, previous: &Path, serialized: &str) -> Result<(), String> {
+fn replace_text_recoverably(
+    destination: &Path,
+    previous: &Path,
+    serialized: &str,
+) -> Result<(), String> {
     let temp = unique_temp_path(destination)?;
     write_new_synced(&temp, serialized)?;
 
@@ -401,7 +404,10 @@ fn prune_backups(directory: &Path, prefix: &str, retain: usize) -> Result<(), St
     entries.sort_by_key(|entry| std::cmp::Reverse(modified_millis(&entry.path())));
     for entry in entries.into_iter().skip(retain) {
         fs::remove_file(entry.path()).map_err(|error| {
-            format!("Could not prune planner backup {}: {error}", entry.path().display())
+            format!(
+                "Could not prune planner backup {}: {error}",
+                entry.path().display()
+            )
         })?;
     }
     Ok(())
@@ -416,9 +422,7 @@ fn create_routine_snapshot_if_needed(
     if !planner_json_is_defensively_valid(previous_serialized) {
         return Ok(());
     }
-    let destination = paths
-        .backup_dir
-        .join(format!("routine-{local_day}.json"));
+    let destination = paths.backup_dir.join(format!("routine-{local_day}.json"));
     write_verified_copy(&destination, previous_serialized)?;
     prune_backups(&paths.backup_dir, "routine-", ROUTINE_RETENTION)
 }
@@ -483,7 +487,10 @@ fn create_operation_snapshot(
     Ok(destination)
 }
 
-fn preserve_corrupt_primary(paths: &DesktopStoragePaths, timestamp: &str) -> Result<Option<PathBuf>, String> {
+fn preserve_corrupt_primary(
+    paths: &DesktopStoragePaths,
+    timestamp: &str,
+) -> Result<Option<PathBuf>, String> {
     let raw = match fs::read_to_string(&paths.primary) {
         Ok(value) => value,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
@@ -658,7 +665,9 @@ pub fn desktop_storage_read_restore_recovery(
     match fs::read_to_string(&state.paths.restore_recovery) {
         Ok(value) => Ok(Some(value)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("Could not read desktop Restore recovery state: {error}")),
+        Err(error) => Err(format!(
+            "Could not read desktop Restore recovery state: {error}"
+        )),
     }
 }
 
@@ -718,8 +727,8 @@ mod tests {
         assert!(write_primary(&paths, &second, "2026-08-28", true).expect("second write"));
         assert!(write_primary(&paths, &third, "2026-08-28", true).expect("third write"));
 
-        let routine = read_text(&paths.backup_dir.join("routine-2026-08-28.json"))
-            .expect("routine snapshot");
+        let routine =
+            read_text(&paths.backup_dir.join("routine-2026-08-28.json")).expect("routine snapshot");
         assert_eq!(routine, first);
         assert_eq!(read_text(&paths.primary).expect("primary"), third);
         assert!(!paths.previous.exists());
@@ -753,8 +762,7 @@ mod tests {
                 .join(format!("routine-2026-07-{index:02}.json"));
             write_new_synced(&path, &data).expect("routine snapshot");
         }
-        prune_backups(&paths.backup_dir, "routine-", ROUTINE_RETENTION)
-            .expect("prune routine");
+        prune_backups(&paths.backup_dir, "routine-", ROUTINE_RETENTION).expect("prune routine");
 
         for index in 0..18 {
             let path = paths
@@ -773,7 +781,12 @@ mod tests {
         let operation_count = fs::read_dir(&paths.backup_dir)
             .expect("read backups")
             .filter_map(Result::ok)
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with("operation-"))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("operation-")
+            })
             .count();
         assert_eq!(routine_count, ROUTINE_RETENTION);
         assert_eq!(operation_count, OPERATION_RETENTION);
@@ -794,8 +807,14 @@ mod tests {
             .expect("preserved path");
         write_primary(&paths, &replacement, "2026-08-28", false).expect("recover primary");
 
-        assert_eq!(read_text(&preserved).expect("preserved corrupt"), "{not-json");
-        assert_eq!(read_text(&paths.primary).expect("recovered primary"), replacement);
+        assert_eq!(
+            read_text(&preserved).expect("preserved corrupt"),
+            "{not-json"
+        );
+        assert_eq!(
+            read_text(&paths.primary).expect("recovered primary"),
+            replacement
+        );
 
         fs::remove_dir_all(root).expect("cleanup test root");
     }
