@@ -6,8 +6,12 @@ import {
 } from '../services/plannerPersistence';
 import { createInitialPlannerDataV2, type PlannerDataV2 } from '../types/v2';
 import {
+  clearPlannerRestoreRecoveryRuntime,
+  getPlannerStorageRuntimeTarget,
+  preparePlannerRestoreRecovery,
   registerPlannerStorageRuntimeBridge,
   resetPlannerStorageRuntimeBridgeForTests,
+  setPendingPlannerRestoreData,
 } from './plannerStorageBridge';
 
 const createPlanner = (name: string): PlannerDataV2 => {
@@ -45,6 +49,9 @@ describe('planner storage runtime bridge', () => {
       source: 'v2',
       warning: 'Recovered from durable storage.',
     });
+    expect(getPlannerStorageRuntimeTarget()?.getStatus().warning).toBe(
+      'Recovered from durable storage.',
+    );
     expect(JSON.parse(localStorage.getItem(PLANNER_STORAGE_KEY_V2) ?? 'null')).toEqual(legacy);
   });
 
@@ -103,5 +110,78 @@ describe('planner storage runtime bridge', () => {
     expect(() => savePlannerDataV2ToLocalStorage(planner)).toThrow(
       'Desktop planner storage is read-only',
     );
+  });
+
+  it('prepares a verified desktop recovery snapshot before Restore proceeds', async () => {
+    const previous = createPlanner('Before Restore');
+    const replacement = createPlanner('After Restore');
+    const createRestoreRecovery = vi.fn(async () => true);
+    const clearRestoreRecovery = vi.fn(async () => undefined);
+
+    registerPlannerStorageRuntimeBridge(
+      {
+        mode: 'desktop-file',
+        getStatus: () => ({ writable: true }),
+        save: vi.fn(async () => undefined),
+        createRestoreRecovery,
+        clearRestoreRecovery,
+      },
+      previous,
+      null,
+    );
+    setPendingPlannerRestoreData(replacement);
+
+    await expect(preparePlannerRestoreRecovery()).resolves.toBe(true);
+    expect(createRestoreRecovery).toHaveBeenCalledWith(
+      previous,
+      replacement,
+      expect.any(String),
+    );
+
+    await clearPlannerRestoreRecoveryRuntime();
+    expect(clearRestoreRecovery).toHaveBeenCalledOnce();
+  });
+
+  it('uses the latest in-memory planner as the pre-Restore recovery source', async () => {
+    const initial = createPlanner('Initial');
+    const edited = createPlanner('Edited');
+    const replacement = createPlanner('Replacement');
+    const createRestoreRecovery = vi.fn(async () => true);
+
+    registerPlannerStorageRuntimeBridge(
+      {
+        mode: 'desktop-file',
+        getStatus: () => ({ writable: true }),
+        save: vi.fn(async () => undefined),
+        createRestoreRecovery,
+      },
+      initial,
+      null,
+    );
+    savePlannerDataV2ToLocalStorage(edited);
+    setPendingPlannerRestoreData(replacement);
+
+    await preparePlannerRestoreRecovery();
+
+    expect(createRestoreRecovery).toHaveBeenCalledWith(
+      edited,
+      replacement,
+      expect.any(String),
+    );
+  });
+
+  it('does not allow desktop Restore when no validated pending replacement is registered', async () => {
+    registerPlannerStorageRuntimeBridge(
+      {
+        mode: 'desktop-file',
+        getStatus: () => ({ writable: true }),
+        save: vi.fn(async () => undefined),
+        createRestoreRecovery: vi.fn(async () => true),
+      },
+      createPlanner('Current'),
+      null,
+    );
+
+    await expect(preparePlannerRestoreRecovery()).resolves.toBe(false);
   });
 });
