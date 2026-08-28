@@ -184,4 +184,59 @@ describe('planner storage runtime bridge', () => {
 
     await expect(preparePlannerRestoreRecovery()).resolves.toBe(false);
   });
+
+  it('keeps matching Restore recovery and clears it after the planner diverges', async () => {
+    const previous = createPlanner('Previous');
+    const replacement = createPlanner('Replacement');
+    const edited = createPlanner('Edited after Restore');
+    const clearRestoreRecovery = vi.fn(async () => undefined);
+
+    registerPlannerStorageRuntimeBridge(
+      {
+        mode: 'desktop-file',
+        getStatus: () => ({ writable: true }),
+        save: vi.fn(async () => undefined),
+        createRestoreRecovery: vi.fn(async () => true),
+        clearRestoreRecovery,
+      },
+      previous,
+      null,
+    );
+    setPendingPlannerRestoreData(replacement);
+    await preparePlannerRestoreRecovery();
+
+    savePlannerDataV2ToLocalStorage(replacement);
+    await Promise.resolve();
+    expect(clearRestoreRecovery).not.toHaveBeenCalled();
+
+    savePlannerDataV2ToLocalStorage(edited);
+    await Promise.resolve();
+    expect(clearRestoreRecovery).toHaveBeenCalledOnce();
+  });
+
+  it('tracks a matching durable recovery loaded at startup until later divergence', async () => {
+    const replacement = createPlanner('Replacement at startup');
+    const edited = createPlanner('Edited later');
+    const clearRestoreRecovery = vi.fn(async () => undefined);
+
+    registerPlannerStorageRuntimeBridge(
+      {
+        mode: 'desktop-file',
+        getStatus: () => ({ writable: true }),
+        save: vi.fn(async () => undefined),
+        clearRestoreRecovery,
+      },
+      replacement,
+      null,
+      true,
+    );
+
+    savePlannerDataV2ToLocalStorage(replacement);
+    await Promise.resolve();
+    expect(clearRestoreRecovery).not.toHaveBeenCalled();
+
+    savePlannerDataV2ToLocalStorage(edited);
+    await Promise.resolve();
+    expect(clearRestoreRecovery).toHaveBeenCalledOnce();
+  });
 });
