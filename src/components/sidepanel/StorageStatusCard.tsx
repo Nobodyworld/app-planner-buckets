@@ -18,15 +18,15 @@ const createFallbackStatus = (): RuntimeStorageStatus => ({
 const describePhase = (status: RuntimeStorageStatus): string => {
   switch (status.phase) {
     case 'saving':
-      return 'Saving…';
+      return 'Storage saving…';
     case 'saved':
-      return 'Saved';
+      return 'Storage saved';
     case 'error':
-      return 'Save failed';
+      return 'Storage save failed';
     case 'read-only':
-      return 'Read-only';
+      return 'Storage read-only';
     default:
-      return status.writable ? 'Ready' : 'Read-only';
+      return status.writable ? 'Storage ready' : 'Storage read-only';
   }
 };
 
