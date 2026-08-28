@@ -26,13 +26,30 @@ interface RuntimeBootstrapSeed {
 let bootstrapSeed: RuntimeBootstrapSeed | null = null;
 let saveTarget: RuntimeSaveTarget | null = null;
 
+const mergeBootstrapWarning = (
+  status: RuntimeStorageStatus,
+  warning: string | null,
+): RuntimeStorageStatus => ({
+  ...status,
+  warning: status.warning ?? warning,
+});
+
 export const registerPlannerStorageRuntimeBridge = (
   target: RuntimeSaveTarget,
   data: PlannerDataV2,
   warning: string | null,
 ): void => {
   bootstrapSeed = { data, warning };
-  saveTarget = target;
+  saveTarget = {
+    mode: target.mode,
+    getStatus: () => mergeBootstrapWarning(target.getStatus(), warning),
+    subscribe: target.subscribe
+      ? (listener) => target.subscribe?.((status) => {
+        listener(mergeBootstrapWarning(status, warning));
+      }) ?? (() => undefined)
+      : undefined,
+    save: (nextData) => target.save(nextData),
+  };
 };
 
 export const getPlannerStorageRuntimeBootstrap = (): RuntimeBootstrapSeed | null => (
