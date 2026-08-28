@@ -90,7 +90,12 @@ export const setPendingPlannerRestoreData = (data: PlannerDataV2 | null): void =
   pendingRestoreData = data;
 };
 
-export const preparePlannerRestoreRecovery = async (): Promise<boolean> => {
+/**
+ * Browser Restore keeps its established synchronous transaction path. Desktop
+ * Restore returns a promise because the verified operation snapshot is durable
+ * filesystem work that must finish before replacement begins.
+ */
+export const preparePlannerRestoreRecovery = (): boolean | Promise<boolean> => {
   if (!saveTarget || saveTarget.mode !== 'desktop-file') return true;
   if (
     !currentPlannerData
@@ -100,15 +105,18 @@ export const preparePlannerRestoreRecovery = async (): Promise<boolean> => {
     return false;
   }
 
-  const recoveryPrepared = await saveTarget.createRestoreRecovery(
-    currentPlannerData,
-    pendingRestoreData,
+  const previousData = currentPlannerData;
+  const replacementData = pendingRestoreData;
+  return saveTarget.createRestoreRecovery(
+    previousData,
+    replacementData,
     new Date().toISOString(),
-  );
-  if (recoveryPrepared) {
-    preparedRestoreReplacementFingerprint = fingerprintPlannerData(pendingRestoreData);
-  }
-  return recoveryPrepared;
+  ).then((recoveryPrepared) => {
+    if (recoveryPrepared) {
+      preparedRestoreReplacementFingerprint = fingerprintPlannerData(replacementData);
+    }
+    return recoveryPrepared;
+  });
 };
 
 export const clearPlannerRestoreRecoveryRuntime = async (): Promise<void> => {
