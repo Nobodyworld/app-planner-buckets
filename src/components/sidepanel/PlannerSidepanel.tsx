@@ -2,15 +2,19 @@ import type {
     ChangeEvent,
     ComponentProps,
     FocusEventHandler,
-    KeyboardEvent,
     MouseEventHandler,
     RefObject,
 } from 'react';
 import { ProjectList } from '../ProjectList';
+import { SidebarDisclosure } from '../SidebarDisclosure';
 import { TemplateLibrary } from '../TemplateLibrary';
 import { ArchivePanel, type ArchiveStats } from './ArchivePanel';
 import { CreateBucketPanel } from './CreateBucketPanel';
-import { DataPanel } from './DataPanel';
+import {
+    DataPanel,
+    type ProjectImportDestinationKind,
+    type ProjectImportSourceOption,
+} from './DataPanel';
 import { QuickTaskPanel } from './QuickTaskPanel';
 import type {
     BucketV2 as Bucket,
@@ -20,6 +24,7 @@ import type {
 
 type ProjectListProps = ComponentProps<typeof ProjectList>;
 type TemplateLibraryProps = ComponentProps<typeof TemplateLibrary>;
+type QuickTaskPanelProps = ComponentProps<typeof QuickTaskPanel>;
 
 export interface PlannerSidepanelProps {
     sidepanelRef: RefObject<HTMLElement>;
@@ -74,20 +79,22 @@ export interface PlannerSidepanelProps {
 
     quickTaskShellRef: RefObject<HTMLDivElement>;
     quickTaskInputRef: RefObject<HTMLInputElement>;
+    quickTaskProjectInputRef: RefObject<HTMLInputElement>;
     quickTaskBucketInputRef: RefObject<HTMLInputElement>;
-    quickTaskOpen: boolean;
     quickTaskTitle: string;
+    quickTaskProjectName: string;
+    quickTaskProjectId: string | null;
     quickTaskBucketName: string;
-    quickTaskBucketSuggestionSuffix: string;
+    quickTaskBucketId: string | null;
+    quickTaskProjectBuckets: Bucket[];
+    quickTaskMessage: string | null;
     activeBuckets: Bucket[];
-    bucketIdByNormalizedName: ReadonlyMap<string, string>;
-    normalizeBucketName: (name: string) => string;
     onQuickTaskTitleChange: (value: string) => void;
+    onQuickTaskProjectNameChange: (value: string) => void;
+    onQuickTaskProjectIdChange: (projectId: string | null) => void;
     onQuickTaskBucketNameChange: (value: string) => void;
     onQuickTaskBucketIdChange: (bucketId: string | null) => void;
-    onQuickTaskTitleKeyDown: (event: KeyboardEvent<HTMLInputElement>) => void;
-    onQuickTaskBucketKeyDown: (event: KeyboardEvent<HTMLInputElement>) => void;
-    onSubmitQuickTask: () => void;
+    onSubmitQuickTask: QuickTaskPanelProps['onSubmit'];
 
     bucketName: string;
     onBucketNameChange: (value: string) => void;
@@ -113,13 +120,19 @@ export interface PlannerSidepanelProps {
     onUnarchiveTask: (task: PlannerTask) => void;
     getBucketName: (bucketId: string | null) => string;
 
-    uploadInputRef: RefObject<HTMLInputElement>;
+    projectImportInputRef: RefObject<HTMLInputElement>;
     restoreInputRef: RefObject<HTMLInputElement>;
-    uploadConfirmRef: RefObject<HTMLDivElement>;
+    projectImportConfirmRef: RefObject<HTMLDivElement>;
     restoreConfirmRef: RefObject<HTMLDivElement>;
     exportScopeMenuRef: RefObject<HTMLDivElement>;
-    hasPendingUploadData: boolean;
-    pendingUploadSummary: string;
+    hasPendingProjectImport: boolean;
+    projectImportSourceKindLabel: string;
+    projectImportSourceOptions: ProjectImportSourceOption[];
+    selectedProjectImportSourceId: string;
+    projectImportDestinationKind: ProjectImportDestinationKind;
+    selectedProjectImportDestinationId: string;
+    projectImportDestinationProjects: ProjectImportSourceOption[];
+    canConfirmProjectImport: boolean;
     hasPendingRestoreData: boolean;
     pendingRestoreSummary: string;
     hasLastRestoreBackup: boolean;
@@ -129,8 +142,11 @@ export interface PlannerSidepanelProps {
     showExportScopeMenu: boolean;
     exportScope: string;
     exportScopeOptionCount: number;
-    onConfirmUploadData: () => void;
-    onCancelUploadData: () => void;
+    onConfirmProjectImport: () => void;
+    onCancelProjectImport: () => void;
+    onProjectImportSourceChange: (projectId: string) => void;
+    onProjectImportDestinationKindChange: (kind: Exclude<ProjectImportDestinationKind, null>) => void;
+    onProjectImportDestinationChange: (projectId: string) => void;
     onToggleExportScopeMenu: () => void;
     onSelectExportScope: (scope: string) => void;
     onExportData: () => void;
@@ -139,7 +155,7 @@ export interface PlannerSidepanelProps {
     onDismissRestoreUndoCard: () => void;
     onUndoRestoreData: () => void;
     onRestoreFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
-    onUploadFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
+    onProjectImportFileChange: (event: ChangeEvent<HTMLInputElement>) => void;
 }
 
 export function PlannerSidepanel({
@@ -193,19 +209,21 @@ export function PlannerSidepanel({
     onApplyTemplate,
     quickTaskShellRef,
     quickTaskInputRef,
+    quickTaskProjectInputRef,
     quickTaskBucketInputRef,
-    quickTaskOpen,
     quickTaskTitle,
+    quickTaskProjectName,
+    quickTaskProjectId,
     quickTaskBucketName,
-    quickTaskBucketSuggestionSuffix,
+    quickTaskBucketId,
+    quickTaskProjectBuckets,
+    quickTaskMessage,
     activeBuckets,
-    bucketIdByNormalizedName,
-    normalizeBucketName,
     onQuickTaskTitleChange,
+    onQuickTaskProjectNameChange,
+    onQuickTaskProjectIdChange,
     onQuickTaskBucketNameChange,
     onQuickTaskBucketIdChange,
-    onQuickTaskTitleKeyDown,
-    onQuickTaskBucketKeyDown,
     onSubmitQuickTask,
     bucketName,
     onBucketNameChange,
@@ -229,13 +247,19 @@ export function PlannerSidepanel({
     onCopyArchivedTask,
     onUnarchiveTask,
     getBucketName,
-    uploadInputRef,
+    projectImportInputRef,
     restoreInputRef,
-    uploadConfirmRef,
+    projectImportConfirmRef,
     restoreConfirmRef,
     exportScopeMenuRef,
-    hasPendingUploadData,
-    pendingUploadSummary,
+    hasPendingProjectImport,
+    projectImportSourceKindLabel,
+    projectImportSourceOptions,
+    selectedProjectImportSourceId,
+    projectImportDestinationKind,
+    selectedProjectImportDestinationId,
+    projectImportDestinationProjects,
+    canConfirmProjectImport,
     hasPendingRestoreData,
     pendingRestoreSummary,
     hasLastRestoreBackup,
@@ -245,8 +269,11 @@ export function PlannerSidepanel({
     showExportScopeMenu,
     exportScope,
     exportScopeOptionCount,
-    onConfirmUploadData,
-    onCancelUploadData,
+    onConfirmProjectImport,
+    onCancelProjectImport,
+    onProjectImportSourceChange,
+    onProjectImportDestinationKindChange,
+    onProjectImportDestinationChange,
     onToggleExportScopeMenu,
     onSelectExportScope,
     onExportData,
@@ -255,7 +282,7 @@ export function PlannerSidepanel({
     onDismissRestoreUndoCard,
     onUndoRestoreData,
     onRestoreFileChange,
-    onUploadFileChange,
+    onProjectImportFileChange,
 }: PlannerSidepanelProps) {
     return (
         <aside
@@ -304,34 +331,24 @@ export function PlannerSidepanel({
                 </button>
             </div>
 
-            <ProjectList
-                projects={plannerData.projects}
-                activeProjectId={activeProjectId}
-                onSelectProject={onSelectProject}
-                onCreateProject={onCreateProject}
-                onRenameProject={onRenameProject}
-                onUpdateProjectDescription={onUpdateProjectDescription}
-                onToggleProjectPin={onToggleProjectPin}
-                onMoveProject={onMoveProject}
-                onDeleteProject={onDeleteProject}
-            />
-
             <QuickTaskPanel
                 shellRef={quickTaskShellRef}
                 taskInputRef={quickTaskInputRef}
+                projectInputRef={quickTaskProjectInputRef}
                 bucketInputRef={quickTaskBucketInputRef}
-                isOpen={quickTaskOpen}
                 title={quickTaskTitle}
+                projectName={quickTaskProjectName}
+                selectedProjectId={quickTaskProjectId}
                 bucketName={quickTaskBucketName}
-                bucketSuggestionSuffix={quickTaskBucketSuggestionSuffix}
-                activeBuckets={activeBuckets}
-                bucketIdByNormalizedName={bucketIdByNormalizedName}
-                normalizeBucketName={normalizeBucketName}
+                selectedBucketId={quickTaskBucketId}
+                projects={plannerData.projects}
+                projectBuckets={quickTaskProjectBuckets}
+                message={quickTaskMessage}
                 onTitleChange={onQuickTaskTitleChange}
+                onProjectNameChange={onQuickTaskProjectNameChange}
+                onProjectSelectionChange={onQuickTaskProjectIdChange}
                 onBucketNameChange={onQuickTaskBucketNameChange}
-                onBucketIdChange={onQuickTaskBucketIdChange}
-                onTitleKeyDown={onQuickTaskTitleKeyDown}
-                onBucketKeyDown={onQuickTaskBucketKeyDown}
+                onBucketSelectionChange={onQuickTaskBucketIdChange}
                 onSubmit={onSubmitQuickTask}
             />
 
@@ -341,82 +358,116 @@ export function PlannerSidepanel({
                 onAddBucket={onAddBucket}
             />
 
-            <TemplateLibrary
-                templates={plannerData.templates}
-                definitions={plannerData.templateDefinitions}
-                selectedTemplateId={selectedTemplateId}
-                activeProjectName={activeProjectName}
-                message={templateMessage}
-                globalGroups={globalBucketGroups}
-                onSelectTemplate={onSelectTemplate}
-                onCreateTemplate={onCreateTemplate}
-                onRenameTemplate={onRenameTemplate}
-                onUpdateTemplateDescription={onUpdateTemplateDescription}
-                onSetTemplateActive={onSetTemplateActive}
-                onMoveTemplate={onMoveTemplate}
-                onDeleteTemplate={onDeleteTemplate}
-                onCreateDefinition={onCreateDefinition}
-                onRenameDefinition={onRenameDefinition}
-                onUpdateDefinitionDescription={onUpdateDefinitionDescription}
-                onSetDefinitionDefaultActive={onSetDefinitionDefaultActive}
-                onMoveDefinition={onMoveDefinition}
-                onDeleteDefinition={onDeleteDefinition}
-                onApplyTemplate={onApplyTemplate}
-            />
+            <SidebarDisclosure title="Projects" meta={plannerData.projects.length}>
+                <ProjectList
+                    embedded
+                    projects={plannerData.projects}
+                    activeProjectId={activeProjectId}
+                    onSelectProject={onSelectProject}
+                    onCreateProject={onCreateProject}
+                    onRenameProject={onRenameProject}
+                    onUpdateProjectDescription={onUpdateProjectDescription}
+                    onToggleProjectPin={onToggleProjectPin}
+                    onMoveProject={onMoveProject}
+                    onDeleteProject={onDeleteProject}
+                />
+            </SidebarDisclosure>
 
-            <ArchivePanel
-                archivedTasks={archivedTasks}
-                stats={stats}
-                showArchive={showArchive}
-                showCompleted={showCompleted}
-                showArchiveConfirm={showArchiveConfirm}
-                triageRecommendation={triageRecommendation}
-                openAdvancedSectionsInTests={openAdvancedSectionsInTests}
-                onToggleArchive={onToggleArchive}
-                onShowCompletedChange={onShowCompletedChange}
-                onArchiveCompletedTasks={onArchiveCompletedTasks}
-                onConfirmArchiveCompletedTasks={onConfirmArchiveCompletedTasks}
-                onCancelArchiveCompletedTasks={onCancelArchiveCompletedTasks}
-                onEditTask={onEditArchivedTask}
-                onDeleteTask={onDeleteArchivedTask}
-                onToggleTask={onToggleArchivedTask}
-                onToggleTaskPin={onToggleArchivedTaskPin}
-                onCopyTask={onCopyArchivedTask}
-                onUnarchiveTask={onUnarchiveTask}
-                getBucketName={getBucketName}
-            />
+            <SidebarDisclosure title="Templates" meta={plannerData.templates.length}>
+                <TemplateLibrary
+                    embedded
+                    templates={plannerData.templates}
+                    definitions={plannerData.templateDefinitions}
+                    selectedTemplateId={selectedTemplateId}
+                    activeProjectName={activeProjectName}
+                    message={templateMessage}
+                    globalGroups={globalBucketGroups}
+                    onSelectTemplate={onSelectTemplate}
+                    onCreateTemplate={onCreateTemplate}
+                    onRenameTemplate={onRenameTemplate}
+                    onUpdateTemplateDescription={onUpdateTemplateDescription}
+                    onSetTemplateActive={onSetTemplateActive}
+                    onMoveTemplate={onMoveTemplate}
+                    onDeleteTemplate={onDeleteTemplate}
+                    onCreateDefinition={onCreateDefinition}
+                    onRenameDefinition={onRenameDefinition}
+                    onUpdateDefinitionDescription={onUpdateDefinitionDescription}
+                    onSetDefinitionDefaultActive={onSetDefinitionDefaultActive}
+                    onMoveDefinition={onMoveDefinition}
+                    onDeleteDefinition={onDeleteDefinition}
+                    onApplyTemplate={onApplyTemplate}
+                />
+            </SidebarDisclosure>
 
-            <DataPanel
-                uploadInputRef={uploadInputRef}
-                restoreInputRef={restoreInputRef}
-                uploadConfirmRef={uploadConfirmRef}
-                restoreConfirmRef={restoreConfirmRef}
-                exportScopeMenuRef={exportScopeMenuRef}
-                hasPendingUploadData={hasPendingUploadData}
-                pendingUploadSummary={pendingUploadSummary}
-                hasPendingRestoreData={hasPendingRestoreData}
-                pendingRestoreSummary={pendingRestoreSummary}
-                hasLastRestoreBackup={hasLastRestoreBackup}
-                hideRestoreUndoCard={hideRestoreUndoCard}
-                isRestoreUndoClosing={isRestoreUndoClosing}
-                dataActionMessage={dataActionMessage}
-                showExportScopeMenu={showExportScopeMenu}
-                exportScope={exportScope}
-                exportScopeOptionCount={exportScopeOptionCount}
-                activeBuckets={activeBuckets}
-                openAdvancedSectionsInTests={openAdvancedSectionsInTests}
-                onConfirmUploadData={onConfirmUploadData}
-                onCancelUploadData={onCancelUploadData}
-                onToggleExportScopeMenu={onToggleExportScopeMenu}
-                onSelectExportScope={onSelectExportScope}
-                onExportData={onExportData}
-                onConfirmRestoreData={onConfirmRestoreData}
-                onCancelRestoreData={onCancelRestoreData}
-                onDismissRestoreUndoCard={onDismissRestoreUndoCard}
-                onUndoRestoreData={onUndoRestoreData}
-                onRestoreFileChange={onRestoreFileChange}
-                onUploadFileChange={onUploadFileChange}
-            />
+            <SidebarDisclosure title="Archive / View Options" meta={`${stats.visible} visible`}>
+                <ArchivePanel
+                    embedded
+                    archivedTasks={archivedTasks}
+                    stats={stats}
+                    showArchive={showArchive}
+                    showCompleted={showCompleted}
+                    showArchiveConfirm={showArchiveConfirm}
+                    triageRecommendation={triageRecommendation}
+                    openAdvancedSectionsInTests={openAdvancedSectionsInTests}
+                    onToggleArchive={onToggleArchive}
+                    onShowCompletedChange={onShowCompletedChange}
+                    onArchiveCompletedTasks={onArchiveCompletedTasks}
+                    onConfirmArchiveCompletedTasks={onConfirmArchiveCompletedTasks}
+                    onCancelArchiveCompletedTasks={onCancelArchiveCompletedTasks}
+                    onEditTask={onEditArchivedTask}
+                    onDeleteTask={onDeleteArchivedTask}
+                    onToggleTask={onToggleArchivedTask}
+                    onToggleTaskPin={onToggleArchivedTaskPin}
+                    onCopyTask={onCopyArchivedTask}
+                    onUnarchiveTask={onUnarchiveTask}
+                    getBucketName={getBucketName}
+                />
+            </SidebarDisclosure>
+
+            <SidebarDisclosure title="Data" className="data-panel">
+                <DataPanel
+                    embedded
+                    projectImportInputRef={projectImportInputRef}
+                    restoreInputRef={restoreInputRef}
+                    projectImportConfirmRef={projectImportConfirmRef}
+                    restoreConfirmRef={restoreConfirmRef}
+                    exportScopeMenuRef={exportScopeMenuRef}
+                    hasPendingProjectImport={hasPendingProjectImport}
+                    projectImportSourceKindLabel={projectImportSourceKindLabel}
+                    projectImportSourceOptions={projectImportSourceOptions}
+                    selectedProjectImportSourceId={selectedProjectImportSourceId}
+                    projectImportDestinationKind={projectImportDestinationKind}
+                    selectedProjectImportDestinationId={selectedProjectImportDestinationId}
+                    projectImportDestinationProjects={projectImportDestinationProjects}
+                    canConfirmProjectImport={canConfirmProjectImport}
+                    hasPendingRestoreData={hasPendingRestoreData}
+                    pendingRestoreSummary={pendingRestoreSummary}
+                    hasLastRestoreBackup={hasLastRestoreBackup}
+                    hideRestoreUndoCard={hideRestoreUndoCard}
+                    isRestoreUndoClosing={isRestoreUndoClosing}
+                    dataActionMessage={dataActionMessage}
+                    showExportScopeMenu={showExportScopeMenu}
+                    exportScope={exportScope}
+                    exportScopeOptionCount={exportScopeOptionCount}
+                    activeProjectName={activeProjectName}
+                    activeBuckets={activeBuckets}
+                    openAdvancedSectionsInTests={openAdvancedSectionsInTests}
+                    onConfirmProjectImport={onConfirmProjectImport}
+                    onCancelProjectImport={onCancelProjectImport}
+                    onProjectImportSourceChange={onProjectImportSourceChange}
+                    onProjectImportDestinationKindChange={onProjectImportDestinationKindChange}
+                    onProjectImportDestinationChange={onProjectImportDestinationChange}
+                    onToggleExportScopeMenu={onToggleExportScopeMenu}
+                    onSelectExportScope={onSelectExportScope}
+                    onExportData={onExportData}
+                    onConfirmRestoreData={onConfirmRestoreData}
+                    onCancelRestoreData={onCancelRestoreData}
+                    onDismissRestoreUndoCard={onDismissRestoreUndoCard}
+                    onUndoRestoreData={onUndoRestoreData}
+                    onRestoreFileChange={onRestoreFileChange}
+                    onProjectImportFileChange={onProjectImportFileChange}
+                />
+            </SidebarDisclosure>
         </aside>
     );
 }

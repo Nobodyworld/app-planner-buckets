@@ -1,0 +1,46 @@
+.paste-undo-notice {
+  position: fixed;
+  z-index: 120;
+  right: clamp(14px, 3vw, 32px);
+  bottom: clamp(14px, 3vw, 28px);
+  display: flex;
+  max-width: min(440px, calc(100vw - 28px));
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--popup-border);
+  border-radius: 14px;
+  color: var(--text);
+  background: var(--popup-surface);
+  box-shadow: var(--shadow-strong);
+}
+
+.paste-undo-notice p {
+  min-width: 0;
+  flex: 1 1 auto;
+  margin: 0;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.paste-undo-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.paste-undo-actions .secondary-button {
+  min-height: 38px;
+  padding: 7px 10px;
+}
+
+@media (max-width: 560px) {
+  .paste-undo-notice {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .paste-undo-actions {
+    justify-content: flex-end;
+  }
+}

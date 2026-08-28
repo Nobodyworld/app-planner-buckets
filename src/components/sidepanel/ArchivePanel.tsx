@@ -9,6 +9,7 @@ export interface ArchiveStats {
 export interface ArchivePanelProps {
     archivedTasks: PlannerTask[];
     stats: ArchiveStats;
+    embedded?: boolean;
     showArchive: boolean;
     showCompleted: boolean;
     showArchiveConfirm: boolean;
@@ -31,6 +32,7 @@ export interface ArchivePanelProps {
 export function ArchivePanel({
     archivedTasks,
     stats,
+    embedded = false,
     showArchive,
     showCompleted,
     showArchiveConfirm,
@@ -49,12 +51,19 @@ export function ArchivePanel({
     onUnarchiveTask,
     getBucketName,
 }: ArchivePanelProps) {
+    const Wrapper = embedded ? 'div' : 'section';
+
     return (
-        <section className="archive-panel panel-card" aria-label="Archive and view options">
-            <div className="archive-header">
-                <h2>Archive / View Options</h2>
-                <span className="toolbar-meta">{stats.visible} visible</span>
-            </div>
+        <Wrapper
+            className={`archive-panel${embedded ? '' : ' panel-card'}`}
+            aria-label={embedded ? undefined : 'Archive and view options'}
+        >
+            {!embedded ? (
+                <div className="archive-header">
+                    <h2>Archive / View Options</h2>
+                    <span className="toolbar-meta">{stats.visible} visible</span>
+                </div>
+            ) : null}
 
             <div className="archive-controls">
                 <label className="inline-toggle" title="Toggle completed task visibility">
@@ -160,6 +169,6 @@ export function ArchivePanel({
                     )
                 )}
             </details>
-        </section>
+        </Wrapper>
     );
 }

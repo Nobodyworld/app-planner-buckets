@@ -41,3 +41,44 @@ describe('TaskCard drag gating', () => {
         expect(onDragStart).toHaveBeenCalledOnce();
     });
 });
+
+describe('TaskCard selection', () => {
+    it('keeps explicit bulk selection independent from completion and ordinary card clicks', () => {
+        const onSelectionChange = vi.fn();
+        const onToggle = vi.fn();
+        const { container } = render(
+            <TaskCard
+                task={task}
+                onEdit={vi.fn()}
+                onDelete={vi.fn()}
+                onToggle={onToggle}
+                onSelectionChange={onSelectionChange}
+                onDragStart={vi.fn()}
+                onDragEnd={vi.fn()}
+            />
+        );
+
+        const selectionCheckbox = screen.getByRole('checkbox', {
+            name: 'Select "Selectable task" for bulk actions',
+        });
+        const completionCheckbox = screen.getByRole('checkbox', {
+            name: 'Mark "Selectable task" complete',
+        });
+
+        expect(selectionCheckbox.closest('label')).toHaveClass('task-selection-control');
+        expect(completionCheckbox.closest('label')).toHaveClass('completion-control');
+
+        fireEvent.click(screen.getByText('Selectable task details'));
+        expect(onSelectionChange).not.toHaveBeenCalled();
+        expect(onToggle).not.toHaveBeenCalled();
+
+        fireEvent.click(selectionCheckbox);
+        expect(onSelectionChange).toHaveBeenCalledWith(true);
+        expect(onToggle).not.toHaveBeenCalled();
+
+        fireEvent.click(completionCheckbox);
+        expect(onToggle).toHaveBeenCalledOnce();
+        expect(onSelectionChange).toHaveBeenCalledOnce();
+        expect(container.querySelector('.task-card')).not.toHaveClass('completed');
+    });
+});

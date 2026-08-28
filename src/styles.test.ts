@@ -50,10 +50,16 @@ describe('bucket drop slot layout contract', () => {
 
 describe('board zoom coordinate contract', () => {
     it.each([
-        ['.board-stage.board-zoom-0', '0.88'],
-        ['.board-stage.board-zoom-3', '1.08'],
-        ['.board-stage.board-zoom-4', '1.14'],
-    ])('keeps %s at its current supported scale', (selector, scale) => {
+        ['.board-stage.board-zoom-70', '0.7'],
+        ['.board-stage.board-zoom-75', '0.75'],
+        ['.board-stage.board-zoom-80', '0.8'],
+        ['.board-stage.board-zoom-85', '0.85'],
+        ['.board-stage.board-zoom-90', '0.9'],
+        ['.board-stage.board-zoom-95', '0.95'],
+        ['.board-stage.board-zoom-100', '1'],
+        ['.board-stage.board-zoom-105', '1.05'],
+        ['.board-stage.board-zoom-110', '1.1'],
+    ])('maps %s to scale %s', (selector, scale) => {
         expect(cssRule(selector)).toMatch(new RegExp(`--board-zoom:\\s*${scale.replace('.', '\\.')};`));
     });
 
@@ -62,6 +68,24 @@ describe('board zoom coordinate contract', () => {
 
         expect(board).toMatch(/transform:\s*scale\(var\(--board-zoom\)\);/);
         expect(board).toMatch(/transform-origin:\s*top left;/);
+    });
+});
+
+describe('board scroll ownership contract', () => {
+    it('makes the focusable board frame the two-axis outer scroll owner', () => {
+        const frame = cssRule('.board-frame');
+
+        expect(frame).toMatch(/height:\s*100%;/);
+        expect(frame).toMatch(/min-height:\s*0;/);
+        expect(frame).toMatch(/overflow:\s*auto;/);
+        expect(frame).not.toMatch(/overflow-y:\s*hidden;/);
+    });
+
+    it('preserves independent vertical task-list scrolling', () => {
+        const taskList = cssRule('.task-list');
+
+        expect(taskList).toMatch(/max-height:\s*clamp\(360px,\s*74vh,\s*1100px\);/);
+        expect(taskList).toMatch(/overflow-y:\s*auto;/);
     });
 });
 
@@ -79,17 +103,24 @@ describe('bucket header containment contract', () => {
         expect(heading).not.toMatch(/\n\s*(?:min-)?width\s*:/);
     });
 
-    it('bounds all actions in a four-column grid without escaping the header', () => {
+    it('bounds actions in two fixed-target rows without escaping the header', () => {
         const actions = cssRule('.bucket-actions');
+        const row = cssRule('.bucket-action-row');
 
         expect(actions).toMatch(/flex:\s*0 0 auto;/);
-        expect(actions).toMatch(/display:\s*grid;/);
-        expect(actions).toMatch(/grid-template-columns:\s*repeat\(4,\s*28px\);/);
+        expect(actions).toMatch(/display:\s*flex;/);
+        expect(actions).toMatch(/flex-direction:\s*column;/);
+        expect(actions).toMatch(/align-items:\s*flex-end;/);
         expect(actions).toMatch(/gap:\s*4px;/);
-        expect(actions).toMatch(/align-content:\s*start;/);
+        expect(row).toMatch(/display:\s*grid;/);
+        expect(row).toMatch(/grid-auto-flow:\s*column;/);
+        expect(row).toMatch(/grid-auto-columns:\s*28px;/);
+        expect(row).toMatch(/min-height:\s*28px;/);
+        expect(row).toMatch(/gap:\s*4px;/);
         expect(actions).not.toMatch(/position:\s*absolute;/);
+        expect(row).not.toMatch(/position:\s*absolute;/);
         expect(actions).not.toMatch(/display:\s*none;/);
-        expect(actions).not.toMatch(/white-space:\s*nowrap;/);
+        expect(row).not.toMatch(/display:\s*none;/);
     });
 
     it('preserves the existing narrow bucket-width contract', () => {
