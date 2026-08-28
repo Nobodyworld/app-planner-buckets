@@ -2,10 +2,10 @@
 
 Planner Buckets supports two parallel delivery modes that share the same React/Vite frontend and planner schema:
 
-- the existing browser application; and
-- a Windows desktop shell built with Tauri 2.
+- the browser application, which uses browser `localStorage`; and
+- the Windows desktop application, which uses validated files in Tauri's runtime-resolved application-data directory.
 
-This document records the implemented shell in issue #39. It does not expand the scope of durable persistence in #40 or signed updates and release publishing in #41.
+This document records the implemented Tauri shell, installer provenance, and durable desktop persistence. Signed updates and release publishing remain issue #41.
 
 ## Current Windows support and prerequisites
 
@@ -18,7 +18,7 @@ Building from a checkout requires:
 - Microsoft C++ Build Tools with the **Desktop development with C++** workload; and
 - WebView2.
 
-The Tauri shell uses `@tauri-apps/cli` `2.11.4`, Rust `tauri` `2.11.5`, and `tauri-build` `2.6.3`. No Tauri frontend API package or Tauri plugin is used.
+The Tauri shell uses `@tauri-apps/cli` `2.11.4`, Rust `tauri` `2.11.5`, and `tauri-build` `2.6.3`. The frontend uses the Tauri core invoke API only to call the constrained Planner Buckets storage commands registered by the shell.
 
 ## Development and build commands
 
@@ -45,7 +45,7 @@ src-tauri\target\release\bundle\nsis\
 
 The configured current-user installer does not require elevated installation and is intended to install outside the Git checkout. It is configured for the normal NSIS Start menu, launch, pinning, and uninstall behavior. Validate those user-facing behaviors through the local installation test before release.
 
-`dist/`, `src-tauri/target/`, installers, and exported planner JSON are generated user or build artifacts and are not committed.
+`dist/`, `src-tauri/target/`, installers, application-data files, backups, and exported planner JSON are generated user or build artifacts and are not committed.
 
 ## Hosted installer artifacts and provenance
 
@@ -77,23 +77,114 @@ Use this policy for an exact acceptance candidate:
 
 A retained CI artifact is not a GitHub Release, is not signed update metadata, and is not evidence that packaging is byte-for-byte reproducible. Reproducibility may be claimed only after independent clean builds produce matching installer bytes. Promoted releases remain governed by issue #41 and must either reuse the exact approved candidate bytes or identify a release rebuild as a distinct candidate with a new manifest and acceptance record.
 
-## Data and migration limitation
+## Storage authority
 
-The desktop shell is transitional. It currently uses the desktop WebView's `localStorage`; it does not yet use an application-data file, automatic backups, or recovery snapshots. The main WebView is configured with an application-data-relative data directory so its browser storage is not tied to the install directory. It is still not a data-loss guarantee.
+The browser and desktop modes intentionally use different persistence adapters:
 
-Continue exporting JSON backups. Browser-to-desktop migration is explicit:
+- **Browser local storage** — the browser application preserves the established schema-v2 `localStorage` keys and remains offline with no Tauri dependency.
+- **Desktop file storage** — the installed Tauri application treats a validated schema-v2 file in the runtime-resolved application-data directory as authoritative.
 
-1. In the browser application, choose **Export All Data**.
-2. Open the desktop application.
-3. Choose **Restore** and select that JSON file.
+The Data panel reports the active mode, save state, last successful save, and the exact runtime-resolved desktop planner and backup locations. Repository code and documentation do not embed a machine-specific checkout or user-profile path.
 
-The same flow can move validated planner data back to the browser. No browser profile is read directly by the desktop shell.
+Within the Tauri application-data root, the desktop adapter uses these relative locations:
+
+```text
+data/planner-v2.json
+backups/routine-YYYY-MM-DD.json
+backups/operation-<UTC timestamp>-<reason>.json
+backups/corrupt-primary-<UTC timestamp>-preserved.json
+backups/restore-recovery.json
+migration-v1.complete
+```
+
+A temporary file and `data/planner-v2.previous.json` may exist while a recoverable replacement is in progress. They are not independent user backups.
+
+## Safe writes and save ordering
+
+Every desktop save is validated by the shared TypeScript schema/integrity boundary before it reaches Rust. The Rust command defensively parses the payload and requires schema version 2 before touching the authoritative file.
+
+For changed content, the shell:
+
+1. creates the applicable routine snapshot before replacement;
+2. writes a uniquely named temporary file beside the primary;
+3. flushes and synchronizes the temporary file;
+4. preserves the old primary as a recoverable previous file;
+5. promotes the temporary file;
+6. re-reads the promoted file;
+7. restores the previous file when promotion or verification fails; and
+8. prunes bounded backups only after the new primary is established.
+
+Identical saves are no-ops and do not create routine snapshots. The frontend serializes and coalesces async saves, assigns monotonically increasing sequence numbers, and the Rust command rejects an older sequence after a newer sequence has committed.
+
+## Automatic backups and retention
+
+Desktop backup policy is deterministic:
+
+- **Routine snapshots** — at most one snapshot of the pre-change primary per local calendar day; newest 30 retained.
+- **Operation snapshots** — verified pre-operation copies for destructive workflows such as full Restore; newest 12 retained.
+- **Corrupt-primary preservation** — an unreadable or invalid primary is copied without modification before repair. Corrupt copies are not silently deleted by routine retention.
+
+The primary file is never counted as a backup and retention does not delete the only established valid candidate.
+
+These snapshots are local recovery aids, not encrypted vaults, remote backups, or a substitute for user-controlled JSON exports.
+
+## Startup recovery
+
+Desktop startup completes storage bootstrap before React mounts, preventing an empty initial render from overwriting a valid primary.
+
+Recovery order is:
+
+1. validate the authoritative primary with the shared schema-v2 validators;
+2. when invalid or missing, inspect the recoverable previous file and ordered routine/operation candidates;
+3. skip invalid candidates without deleting them;
+4. select the newest valid candidate;
+5. preserve an invalid primary and repair the primary through the same verified replacement command when the writer is available; and
+6. surface the recovery result and any read-only limitation in the Data panel.
+
+If no valid candidate remains after the one-time migration marker exists, Planner Buckets initializes a new planner rather than resurrecting stale WebView data.
+
+## One-time WebView migration
+
+The desktop shell migrates only when all of these conditions are true:
+
+- no valid durable primary exists;
+- no valid desktop backup exists; and
+- `migration-v1.complete` is absent.
+
+It then evaluates the current desktop WebView's established v2/v1 localStorage through the same validators and deterministic migration used by the browser application. The durable primary is written and verified before the marker is created.
+
+The legacy WebView data is not deleted or overwritten by desktop planner saves. Once the marker exists, the desktop bootstrap will not import that legacy planner again. Browser-to-desktop transfer from an unrelated browser profile still uses explicit **Export All data** and **Restore** because the desktop application does not inspect another browser's profile.
+
+## Restore and Undo Restore
+
+The Data panel parses and validates the selected full-backup JSON before confirmation. In desktop mode, the Confirm Restore action awaits both:
+
+- a verified operation snapshot of the current planner; and
+- a durable Restore-recovery record that fingerprints the replacement planner.
+
+Restore does not begin if that preparation fails. After restart, a matching durable recovery record is mirrored into the existing Undo Restore UI. Undo, dismissal, project import, or a later divergent planner state retires stale recovery state.
+
+Scoped project/bucket/Unassigned exchange files remain import inputs and are rejected by full Restore.
+
+## Multi-instance behavior
+
+The desktop shell acquires one process-lifetime Windows writer mutex for the application identifier. A second process that cannot acquire the writer guard opens with an explicit read-only storage state instead of participating in last-writer-wins file replacement.
+
+Read-only status and the reason are visible in the Data panel. Browser mode is unaffected.
+
+## Uninstall and lifecycle boundary
+
+The authoritative planner and backup directories are application data, not Git checkout files. Issue #60 owns native verification of repair install, uninstall/reinstall, retained application data, optional cleanup behavior, and WebView lifecycle boundaries. Do not claim uninstall survival until that exact installed-candidate matrix is completed.
+
+Continue making external **Export All data** JSON backups before destructive or release acceptance work.
 
 ## Security boundaries
 
-The packaged shell loads only its local frontend. Development uses `http://localhost:5173` and its local Vite WebSocket for hot reload. The CSP allows only these local development connections plus local packaged assets; it allows inline styles because the existing React frontend uses them. The shell exposes no global Tauri JavaScript object and grants its main window no frontend Tauri API permissions.
+The packaged shell loads only its local frontend. Development uses `http://localhost:5173` and its local Vite WebSocket for hot reload. The CSP allows only these local development connections plus local packaged assets; it allows inline styles because the existing React frontend uses them.
 
-It does not request filesystem, shell, process, broad network, clipboard, dialog, updater, or user-selected-path access. It contains no persistence commands.
+The shell exposes no global Tauri JavaScript object and grants no generic filesystem, shell, process, dialog, broad network, updater, or user-selected-path permission. The frontend can invoke only the registered Planner Buckets storage command surface and the existing clipboard plugin. Rust resolves the application-data paths; the frontend never supplies an arbitrary filesystem destination.
+
+Storage is local but is not claimed to be encrypted at rest. Planner data, backups, and migration copies should be protected by the operating-system account and device controls appropriate to the user.
 
 ## Scope split
 
@@ -102,12 +193,12 @@ It does not request filesystem, shell, process, broad network, clipboard, dialog
 - Tauri 2 project, NSIS installer configuration, icons, and constrained capability setup.
 - Browser and desktop development/build commands.
 - Windows CI compilation and local installer validation.
-- Transitional WebView `localStorage` disclosure and JSON migration instructions.
 
 ### #40 — durable persistence and backups
 
-- Validated application-data files, backup retention, recovery snapshots, and desktop data-location reporting.
-- Any persistence adapter changes or frontend/Rust persistence commands.
+- Validated application-data files and browser/desktop storage adapters.
+- Safe replacement, backup retention, recovery candidates, writer exclusion, migration, Restore recovery, and storage-health reporting.
+- Deterministic frontend/Rust validation and narrow installed-Tauri acceptance preparation.
 
 ### #41 — signed updater and releases
 
@@ -119,8 +210,6 @@ Run the browser checks and the Rust shell checks before submitting desktop chang
 
 ```text
 npm ci
-npm test
-npm run build
 npm run verify
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
@@ -128,4 +217,4 @@ cargo test --manifest-path src-tauri/Cargo.toml
 npm run desktop:build
 ```
 
-Also perform local Windows smoke tests for `npm run desktop:dev`, the generated installer, and the independent browser command. Record only tests that were genuinely completed.
+Also perform exact-head browser-first storage-status/recovery checks and narrow local Windows smoke tests for `npm run desktop:dev`, installed-app restart persistence, writer exclusion, the generated installer, and lifecycle behavior. Record only tests that were genuinely completed.
