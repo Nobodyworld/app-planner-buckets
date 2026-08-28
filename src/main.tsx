@@ -6,6 +6,7 @@ import { registerPlannerStorageRuntimeBridge } from './storage/plannerStorageBri
 import { bootstrapPlannerStorageRuntime } from './storage/plannerStorageRuntime';
 import './styles.css';
 import './responsiveLayout.css';
+import './storageStatus.css';
 
 installBoardScrollChaining();
 
