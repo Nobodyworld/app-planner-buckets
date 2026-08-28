@@ -17,7 +17,7 @@ describe('StorageStatusCard', () => {
     render(<StorageStatusCard />);
 
     expect(screen.getByText('Browser local storage')).toBeInTheDocument();
-    expect(screen.getByText('Ready')).toBeInTheDocument();
+    expect(screen.getByText('Storage ready')).toBeInTheDocument();
   });
 
   it('shows desktop paths, read-only warnings, and save failures', () => {
@@ -53,7 +53,7 @@ describe('StorageStatusCard', () => {
     render(<StorageStatusCard />);
 
     expect(screen.getByText('Desktop file storage')).toBeInTheDocument();
-    expect(screen.getByText('Read-only')).toBeInTheDocument();
+    expect(screen.getByText('Storage read-only')).toBeInTheDocument();
     expect(screen.getByText('runtime-data/planner-v2.json')).toBeInTheDocument();
     expect(screen.getByText('runtime-data/backups')).toBeInTheDocument();
     expect(screen.getByText('Another process owns desktop storage.')).toBeInTheDocument();
@@ -68,7 +68,7 @@ describe('StorageStatusCard', () => {
       listener?.(status);
     });
 
-    expect(screen.getByText('Save failed')).toBeInTheDocument();
+    expect(screen.getByText('Storage save failed')).toBeInTheDocument();
     expect(screen.getByText('Disk write failed.')).toHaveAttribute('role', 'alert');
   });
 });
