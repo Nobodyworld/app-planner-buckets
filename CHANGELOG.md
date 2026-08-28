@@ -10,6 +10,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - Added structured bug report and feature request issue forms.
 - Added a pull request template with validation, screenshot, and release-safety prompts.
+- Added retained CI-built Windows installer artifacts with SHA-256 and provenance manifests for exact-source acceptance.
 
 ### Changed
 
@@ -18,6 +19,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Clarified that the original planning documents are historical design records and that current source, tests, and README documentation are authoritative.
 - Routed security reports to the private reporting guidance instead of allowing unstructured public security issues.
 - Clarified localStorage privacy notes in the README and security policy.
+- Documented the canonical installer-candidate, rebuild, retention, and release-promotion boundaries.
 
 ### Fixed
 
