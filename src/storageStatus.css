@@ -1,0 +1,100 @@
+.storage-status-card {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0.75rem 0 1rem;
+  padding: 0.85rem;
+  border: 1px solid var(--border, #d6d9df);
+  border-radius: 0.75rem;
+  background: var(--surface-soft, rgba(127, 127, 127, 0.08));
+}
+
+.storage-status-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.storage-status-heading h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.storage-status-phase {
+  flex: 0 0 auto;
+  padding: 0.18rem 0.5rem;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.storage-status-saving {
+  opacity: 0.8;
+}
+
+.storage-status-error,
+.storage-status-read-only {
+  color: var(--danger, #a43c3c);
+}
+
+.storage-status-details {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  font-size: 0.82rem;
+}
+
+.storage-status-details > div {
+  display: grid;
+  grid-template-columns: minmax(5rem, auto) minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: start;
+}
+
+.storage-status-details dt {
+  font-weight: 700;
+}
+
+.storage-status-details dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.storage-status-details code {
+  display: block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  font-size: 0.76rem;
+}
+
+.storage-status-warning,
+.storage-status-error {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.storage-status-warning {
+  color: var(--warning-text, currentColor);
+}
+
+.storage-status-error {
+  color: var(--danger, #a43c3c);
+  font-weight: 650;
+}
+
+.app-bootstrap-error {
+  max-width: 42rem;
+  margin: 4rem auto;
+  padding: 1.5rem;
+  border: 1px solid var(--danger, #a43c3c);
+  border-radius: 1rem;
+  background: var(--surface, #fff);
+  color: var(--text, #20242a);
+}
+
+.app-bootstrap-error h1 {
+  margin-top: 0;
+}

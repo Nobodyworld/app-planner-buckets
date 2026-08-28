@@ -1,5 +1,9 @@
 import type { PlannerData } from '../types';
 import { createId, loadPlannerData, savePlannerData } from '../storage/plannerStorage';
+import {
+    forwardPlannerSaveToRuntime,
+    getPlannerStorageRuntimeBootstrap,
+} from '../storage/plannerStorageBridge';
 import type { BucketV2, PlannerDataV2 } from '../types/v2';
 import { createInitialPlannerDataV2 } from '../types/v2';
 import { migrateV1toV2 } from '../types/migration';
@@ -106,15 +110,25 @@ export const saveToLocalStorage = (data: PlannerData): void => {
  * Browser adapter: Load v2 planner data from localStorage.
  *
  * Loading order:
- * 1. Valid v2 data from the v2 key
- * 2. Valid v1 data from the v1 key, migrated deterministically and saved to v2
- * 3. New v2 data using a runtime timestamp
+ * 1. Runtime bootstrap supplied before React mounts (desktop or browser startup)
+ * 2. Valid v2 data from the v2 key
+ * 3. Valid v1 data from the v1 key, migrated deterministically and saved to v2
+ * 4. New v2 data using a runtime timestamp
  *
  * The v1 key is never deleted or overwritten here.
  */
 export const loadPlannerDataV2FromLocalStorage = (
     createTimestamp: () => string = () => new Date().toISOString(),
 ): PlannerDataV2LoadResult => {
+    const runtimeBootstrap = getPlannerStorageRuntimeBootstrap();
+    if (runtimeBootstrap) {
+        return {
+            data: runtimeBootstrap.data,
+            source: 'v2',
+            warning: runtimeBootstrap.warning,
+        };
+    }
+
     let warning: string | null = null;
     const rawV2 = localStorage.getItem(PLANNER_STORAGE_KEY_V2);
 
@@ -154,12 +168,18 @@ export const loadPlannerDataV2FromLocalStorage = (
 };
 
 /**
- * Browser adapter: Save validated v2 planner data to localStorage.
- * Does not touch the v1 key, which remains a fallback backup.
+ * Save validated v2 planner data through the active runtime.
+ *
+ * Browser mode writes the established localStorage key. Desktop mode forwards
+ * to the durable file adapter and deliberately leaves legacy WebView storage
+ * unchanged after one-time migration.
  */
 export const savePlannerDataV2ToLocalStorage = (data: PlannerDataV2): void => {
     if (!isValidPlannerDataV2(data)) {
         throw new Error('Cannot save invalid v2 planner data');
+    }
+    if (forwardPlannerSaveToRuntime(data)) {
+        return;
     }
     localStorage.setItem(PLANNER_STORAGE_KEY_V2, JSON.stringify(data));
 };
