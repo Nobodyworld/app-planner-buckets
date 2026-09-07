@@ -17,9 +17,14 @@ for (const stream of [server.stdout, server.stderr]) stream.on('data', (data) =>
 let browser;
 let page;
 const pause = (ms) => new Promise((yes) => setTimeout(yes, ms));
-async function openData() {
+async function openControls() {
   const panel = page.locator('.sidepanel');
-  if ((await panel.getAttribute('class')).includes('collapsed')) await page.locator('.sidepanel-toggle').first().click();
+  const toggle = page.locator('.sidepanel-toggle').first();
+  // Narrow layouts show the cards directly and intentionally hide this toggle.
+  if ((await panel.getAttribute('class')).includes('collapsed') && await toggle.isVisible()) await toggle.click();
+}
+async function openData() {
+  await openControls();
   const toggle = page.locator('.sidebar-disclosure-toggle').filter({ has: page.locator('.sidebar-disclosure-title', { hasText: /^Data$/ }) });
   if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
   const data = page.locator('.sidebar-disclosure').filter({ has: page.locator('.sidebar-disclosure-title', { hasText: /^Data$/ }) });
@@ -43,7 +48,12 @@ async function pointer(locator, activate = true) {
   }), 'Control center must receive pointer input, not a clipping ancestor or overlay.');
   if (activate) await page.mouse.click(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
 }
-async function task(title) { const input = page.getByRole('textbox', { name: 'Task title', exact: true }); await input.fill(title); await input.press('Enter'); }
+async function task(title) {
+  await openControls();
+  const input = page.getByRole('textbox', { name: 'Task title', exact: true });
+  await input.fill(title); await input.press('Enter');
+  await page.getByText(title, { exact: true }).waitFor();
+}
 try {
   let ready = false;
   for (let i = 0; i < 100; i += 1) { try { if ((await fetch(origin)).ok) { ready = true; break; } } catch {} await pause(100); }
