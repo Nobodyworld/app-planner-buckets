@@ -10,7 +10,7 @@ assert(process.env.ACCEPTANCE_EVIDENCE && relative(root, evidence).startsWith('.
 assert(process.env.PLAYWRIGHT_MODULE, 'Provide the isolated Playwright module path.');
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 await mkdir(evidence, { recursive: true });
-const report = { sourceSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), browserPath: 'Playwright CI fallback; Codex Browser plugin is not available on the runner', results: [], consoleErrors: [], requestFailures: [] };
+const report = { sourceSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), browserPath: 'Playwright CI fallback; Codex Browser plugin is not available on the runner', results: [], consoleErrors: [], requestFailures: [], interactions: [] };
 const origin = 'http://localhost:5179';
 const server = spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--mode', 'acceptance', '--host', 'localhost', '--port', '5179', '--strictPort'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] });
 for (const stream of [server.stdout, server.stderr]) stream.on('data', (data) => { void appendFile(join(evidence, 'vite.log'), data); });
@@ -20,13 +20,19 @@ const pause = (ms) => new Promise((yes) => setTimeout(yes, ms));
 async function openControls() {
   const panel = page.locator('.sidepanel');
   const toggle = page.locator('.sidepanel-toggle').first();
-  // Narrow layouts show the cards directly and intentionally hide this toggle.
   if ((await panel.getAttribute('class')).includes('collapsed') && await toggle.isVisible()) await toggle.click();
 }
 async function openData() {
   await openControls();
   const toggle = page.locator('.sidebar-disclosure-toggle').filter({ has: page.locator('.sidebar-disclosure-title', { hasText: /^Data$/ }) });
-  if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
+  if (await toggle.getAttribute('aria-expanded') !== 'true') {
+    const before = await toggle.evaluate((element) => ({ expanded: element.getAttribute('aria-expanded'), panel: element.closest('.sidepanel').className, rect: element.getBoundingClientRect().toJSON(), scroll: window.scrollY }));
+    await toggle.click();
+    await pause(300);
+    const after = await toggle.evaluate((element) => ({ expanded: element.getAttribute('aria-expanded'), panel: element.closest('.sidepanel').className, rect: element.getBoundingClientRect().toJSON(), scroll: window.scrollY, active: document.activeElement?.outerHTML }));
+    report.interactions.push({ viewport: page.viewportSize(), before, after });
+    assert.equal(after.expanded, 'true', 'A single Data disclosure pointer click must open the region.');
+  }
   const data = page.locator('.sidebar-disclosure').filter({ has: page.locator('.sidebar-disclosure-title', { hasText: /^Data$/ }) });
   const advanced = data.locator('details[aria-label="Advanced data actions"]');
   if (await advanced.getAttribute('open') === null) await advanced.locator('summary').click();
@@ -61,6 +67,15 @@ try {
   browser = await chromium.launch(); report.browserVersion = browser.version();
   for (const [width, height] of [[1280, 720], [1440, 900], [960, 640], [700, 900]]) {
     const context = await browser.newContext({ viewport: { width, height }, acceptDownloads: true });
+    await context.addInitScript(() => {
+      window.__acceptancePointerTrace = [];
+      for (const type of ['pointerdown', 'focusin', 'pointerup', 'click']) document.addEventListener(type, (event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const button = target.closest('button');
+        window.__acceptancePointerTrace.push({ type, target: target.tagName, button: button?.textContent, x: event.clientX, y: event.clientY, rect: button?.getBoundingClientRect().toJSON(), scroll: window.scrollY, expanded: button?.getAttribute('aria-expanded'), panel: document.querySelector('.sidepanel')?.className });
+      }, true);
+    });
     page = await context.newPage(); page.setDefaultTimeout(12000);
     page.on('pageerror', (error) => report.consoleErrors.push(error.message));
     page.on('console', (message) => { if (message.type() === 'error') report.consoleErrors.push(message.text()); });
@@ -94,8 +109,6 @@ try {
     assert(saved.durable.tasks.some((item) => item.title === title));
     await pointer(page.getByRole('button', { name: 'Restore from JSON backup', exact: true }), false);
     await page.screenshot({ path: join(evidence, `data-recovered-${width}.png`) });
-
-    // The normal browser adapter proves real Restore/Undo; the fault host does not simulate them.
     await page.goto(origin); await page.locator('.app-shell').waitFor();
     const previousTitle = `Before restore ${width}`; await task(previousTitle);
     data = await openData();
@@ -113,7 +126,11 @@ try {
   report.result = 'PASS';
 } catch (error) {
   report.result = 'FAIL'; report.error = error.stack ?? String(error);
-  if (page && !page.isClosed()) { await page.screenshot({ path: join(evidence, 'failure.png') }).catch(() => undefined); await writeFile(join(evidence, 'failure-dom.txt'), await page.locator('body').innerText().catch(() => '')); }
+  if (page && !page.isClosed()) {
+    report.pointerTrace = await page.evaluate(() => window.__acceptancePointerTrace).catch(() => []);
+    await page.screenshot({ path: join(evidence, 'failure.png') }).catch(() => undefined);
+    await writeFile(join(evidence, 'failure-dom.txt'), await page.locator('body').innerText().catch(() => ''));
+  }
   process.exitCode = 1;
 } finally {
   if (browser) await browser.close();
