@@ -21,7 +21,11 @@ concurrency:
 jobs:
   acceptance-support:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      ACCEPTANCE_EVIDENCE: ${{ runner.temp }}/planner-acceptance-evidence
+      PLAYWRIGHT_MODULE: ${{ runner.temp }}/planner-browser-tools/node_modules/playwright/index.mjs
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/planner-browser-binaries
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,10 +37,21 @@ jobs:
       - name: Check isolated configuration generator
         run: node --test scripts/acceptance/native-profile.check.mjs
       - run: npm ci
+      - name: Capture current locked-graph audit for issue 85
+        shell: bash
+        run: |
+          mkdir -p "$ACCEPTANCE_EVIDENCE"
+          set +e
+          npm audit --json > "$ACCEPTANCE_EVIDENCE/npm-audit.json"
+          result=$?
+          set -e
+          printf '%s\n' "$result" > "$ACCEPTANCE_EVIDENCE/npm-audit-exit.txt"
+          node -e 'const fs=require("fs"); const a=JSON.parse(fs.readFileSync(process.env.ACCEPTANCE_EVIDENCE+"/npm-audit.json","utf8")); console.log(JSON.stringify(a.metadata??a.error)); if (!a.metadata?.vulnerabilities) process.exit(1);'
+          # This captures the finding, not a security waiver or an audit fix.
       - name: Typecheck acceptance entry and real application imports
         run: npx tsc --project acceptance/tsconfig.json
-      - name: Test fault host against real persistence coordinator
-        run: npx vitest run acceptance/storageFaultHost.test.ts
+      - name: Test real coordinator fault and close/reload ordering
+        run: npx vitest run acceptance/storageFaultHost.test.ts acceptance/storageLifecycleTiming.test.ts
       - name: Confirm production build excludes fault injection
         run: |
           npm run build
@@ -46,3 +61,19 @@ jobs:
             exit 1
           fi
           git diff --exit-code
+      - name: Install pinned isolated browser-test tools
+        run: |
+          npm install --prefix "$RUNNER_TEMP/planner-browser-tools" --no-save --package-lock=false --ignore-scripts playwright@1.58.2
+          node "$RUNNER_TEMP/planner-browser-tools/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Render Data pointer reachability and Retry Restore Undo
+        run: node scripts/acceptance/data-panel.browser.mjs
+      - name: Check no tracked input drift
+        run: git diff --exit-code
+      - name: Retain focused acceptance and audit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: storage-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.ACCEPTANCE_EVIDENCE }}
+          retention-days: 14
+          if-no-files-found: error

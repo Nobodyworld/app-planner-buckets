@@ -1,4 +1,5 @@
 import { useId, useState, type ReactNode } from 'react';
+import './SidebarDisclosure.css';
 
 interface SidebarDisclosureProps {
   title: string;

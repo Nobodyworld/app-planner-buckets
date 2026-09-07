@@ -1,0 +1,5 @@
+/* The sidebar owns vertical scrolling. Shrinking an overflow-hidden disclosure
+   clips its controls instead of contributing their full height to that scroller. */
+.sidepanel > .sidebar-disclosure {
+  flex: 0 0 auto;
+}
