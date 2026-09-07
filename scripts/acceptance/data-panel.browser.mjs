@@ -99,6 +99,17 @@ try {
     const failed = JSON.parse(await page.locator('#persisted-evidence').textContent());
     assert.deepEqual(failed.durable, initial.durable);
     const dimensions = await metrics(data);
+    const storageBounds = await data.locator('.storage-status-card').evaluate((card) => ({
+      clientWidth: card.clientWidth, scrollWidth: card.scrollWidth,
+      children: [...card.children].map((child) => ({
+        text: child.textContent, right: child.getBoundingClientRect().right,
+      })),
+      right: card.getBoundingClientRect().right,
+      disclosureRight: card.closest('.sidebar-disclosure').getBoundingClientRect().right,
+    }));
+    assert(storageBounds.scrollWidth <= storageBounds.clientWidth + 2, 'Native-shaped errors must not widen the storage grid or hide Retry.');
+    assert(storageBounds.right <= storageBounds.disclosureRight + 2, 'Storage errors must stay inside the Data disclosure.');
+    assert(storageBounds.children.every((child) => child.right <= storageBounds.right + 2), 'Every storage control must fit inside the card.');
     assert.equal(dimensions.flexShrink, '0');
     assert(dimensions.scrollHeight <= dimensions.clientHeight + 2, 'Data disclosure must not hide vertically overflowing controls.');
     await pointer(page.getByRole('button', { name: 'Retry save', exact: true }), false);

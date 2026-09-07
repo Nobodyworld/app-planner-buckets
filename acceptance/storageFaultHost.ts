@@ -22,7 +22,10 @@ export function createStorageFaultHost(initial: PlannerDataV2) {
     if (failNext) {
       failNext = false;
       failures += 1;
-      throw new Error('Synthetic acceptance write failure; persisted fixture is unchanged.');
+      // A native sharing error contains an unbroken Windows path. Keep that shape
+      // in the fixture so layout checks catch min-content overflow around Retry.
+      const syntheticPath = String.raw`C:\Synthetic\AppData\Local\com.nobodyworld.plannerbuckets.acceptance.00000000000000000000000000000000\data\planner-v2.json`;
+      throw new Error(`Synthetic acceptance write failure: Could not read ${syntheticPath}: The process cannot access the file because it is being used by another process. (os error 32); persisted fixture is unchanged.`);
     }
     if (typeof args.serialized !== 'string' || typeof args.sequence !== 'number' || typeof args.savedAt !== 'string') {
       throw new Error('Malformed synthetic write.');

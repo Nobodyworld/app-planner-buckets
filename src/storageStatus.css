@@ -74,6 +74,8 @@
   margin: 0;
   font-size: 0.8rem;
   line-height: 1.4;
+  /* Native errors include long paths; they must not widen the grid and Retry. */
+  overflow-wrap: anywhere;
 }
 
 .storage-status-warning {
