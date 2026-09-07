@@ -197,7 +197,13 @@ export class DesktopPlannerStorageAdapter extends ObservableStorage implements P
   };
   getRestoreRecovery = (data: PlannerDataV2): PlannerDataV2 | null => this.recovery?.replacementFingerprint === fingerprintPlannerData(data) ? this.recovery.previousData : null;
   loadRestoreRecovery = async (data: PlannerDataV2): Promise<PlannerDataV2 | null> => {
-    const serialized = await this.invokeCommand<string | null>('desktop_storage_read_restore_recovery', { session: this.session });
+    let serialized: string | null;
+    try { serialized = await this.invokeCommand<string | null>('desktop_storage_read_restore_recovery', { session: this.session }); }
+    catch (error) {
+      this.update({ warning: `Planner loaded; recovery record could not be read and was preserved: ${messageOf(error)}` });
+      this.recovery = null;
+      return null;
+    }
     this.recovery = serialized ? loadRestoreRecoverySnapshot(memoryStorage(serialized), data) : null;
     // Invalid/mismatching records are not applied, but read-only bootstrap never deletes files.
     return this.getRestoreRecovery(data);
@@ -211,16 +217,17 @@ export class DesktopPlannerStorageAdapter extends ObservableStorage implements P
     if (!isValidPlannerDataV2(previous) || !isValidPlannerDataV2(replacement)) return Promise.reject(new Error('Restore requires valid complete planner data.'));
     const before = JSON.parse(JSON.stringify(previous)) as PlannerDataV2;
     const after = JSON.parse(JSON.stringify(replacement)) as PlannerDataV2;
+    this.update({ phase: 'saving', error: null });
     return this.enqueue(async () => {
       this.writable();
-      if (signal.aborted) return false;
+      if (signal.aborted) { this.update({ phase: this.unsaved ? 'error' : this.status.lastSavedAt ? 'saved' : 'idle' }); return false; }
       onPhase('preparing');
       const createdAt = new Date().toISOString();
       try {
         // Ordinary saves ahead of this transaction have drained. CAS in Rust also checks
         // the actual primary, so a stale UI cannot replace a newer durable planner.
         const receipt = parseObject(await this.invokeCommand<string>('desktop_storage_create_operation_snapshot', { serialized: JSON.stringify(before), reason: keepUndo ? 'restore' : 'undo-restore', timestamp: createdAt, session: this.session }));
-        if (signal.aborted) return false;
+        if (signal.aborted) { this.update({ phase: this.unsaved ? 'error' : this.status.lastSavedAt ? 'saved' : 'idle' }); return false; }
         const memory = memoryStorage();
         const prepared = saveRestoreRecoverySnapshot(memory, before, after, createdAt);
         if (!prepared.ok) throw new Error('Could not validate the Restore recovery snapshot.');

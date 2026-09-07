@@ -13,7 +13,7 @@ The desktop shell is intended for Windows 10 version 1803 or later and Windows 1
 
 Building from a checkout requires:
 
-- Node.js `^20.19.0 || ^22.12.0 || ^24.0.0`;
+- maintained Node.js 22 LTS (at least 22.12) or 24 LTS; the package engine range still records historical Node 20 compatibility, not an upstream support promise;
 - Rust stable with the `x86_64-pc-windows-msvc` host;
 - Microsoft C++ Build Tools with the **Desktop development with C++** workload; and
 - WebView2.
@@ -77,100 +77,51 @@ Use this policy for an exact acceptance candidate:
 
 A retained CI artifact is not a GitHub Release, is not signed update metadata, and is not evidence that packaging is byte-for-byte reproducible. Reproducibility may be claimed only after independent clean builds produce matching installer bytes. Promoted releases remain governed by issue #41 and must either reuse the exact approved candidate bytes or identify a release rebuild as a distinct candidate with a new manifest and acceptance record.
 
-## Storage authority
+## Storage authority and health
 
-The browser and desktop modes intentionally use different persistence adapters:
+The browser remains a supported offline localStorage application using the existing schema-v2 keys and import/export behavior. The installed Windows application uses Tauri's runtime-resolved application-data directory. The Data panel intentionally reports the resolved planner and backup locations; these runtime diagnostics are not hard-coded developer paths.
 
-- **Browser local storage** — the browser application preserves the established schema-v2 `localStorage` keys and remains offline with no Tauri dependency.
-- **Desktop file storage** — the installed Tauri application treats a validated schema-v2 file in the runtime-resolved application-data directory as authoritative.
-
-The Data panel reports the active mode, save state, last successful save, and the exact runtime-resolved desktop planner and backup locations. Repository code and documentation do not embed a machine-specific checkout or user-profile path.
-
-Within the Tauri application-data root, the desktop adapter uses these relative locations:
+Relative native files are:
 
 ```text
 data/planner-v2.json
+data/planner-v2.previous.json
+data/planner-v2.rollback-<identity>.json
+data/planner-storage.lock
 backups/routine-YYYY-MM-DD.json
-backups/operation-<UTC timestamp>-<reason>.json
-backups/corrupt-primary-<UTC timestamp>-preserved.json
+backups/operation-<UTC timestamp>-<reason>-<identity>.json
+backups/corrupt-primary-<identity>.json
 backups/restore-recovery.json
 migration-v1.complete
 ```
 
-A temporary file and `data/planner-v2.previous.json` may exist while a recoverable replacement is in progress. They are not independent user backups.
+Previous/rollback files are interrupted-transaction recovery candidates, not routine backups. Temporary files are never selected as authoritative data.
 
-## Safe writes and save ordering
+## Safe writes, recovery and retention
 
-Every desktop save is validated by the shared TypeScript schema/integrity boundary before it reaches Rust. The Rust command defensively parses the payload and requires schema version 2 before touching the authoritative file.
+The shared TypeScript validators remain the canonical schema and relational-integrity boundary. Rust defensively requires complete v2 collections and owns paths, exclusive writer handles, flushing, replacement and exact-byte verification. A version marker alone is not proof of valid planner data.
 
-For changed content, the shell:
+New bytes are written and synchronized beside the primary before promotion. Existing previous/rollback candidates survive until the replacement verifies. Promotion or rollback failures retain discoverable recovery files and report an error; cleanup cannot turn a committed write into a false failure. Corrupt-primary preservation copies raw bytes, including invalid UTF-8.
 
-1. creates the applicable routine snapshot before replacement;
-2. writes a uniquely named temporary file beside the primary;
-3. flushes and synchronizes the temporary file;
-4. preserves the old primary as a recoverable previous file;
-5. promotes the temporary file;
-6. re-reads the promoted file;
-7. restores the previous file when promotion or verification fails; and
-8. prunes bounded backups only after the new primary is established.
+Startup makes one native session handshake before React mounts. It selects a valid primary, then the newest fully validated previous/routine/operation candidate with a deterministic tie-break. Unreadable files are errors, not missing data. Existing corrupt evidence with no valid candidate, or missing data after completed migration, stops startup without resetting the planner or replaying legacy WebView state.
 
-Identical saves are no-ops and do not create routine snapshots. The frontend serializes and coalesces async saves, assigns monotonically increasing sequence numbers, and the Rust command rejects an older sequence after a newer sequence has committed.
+Routine snapshots retain the first pre-change planner for each changed local calendar day and keep the newest **30** validated daily files. Operation snapshots retain **12** validated files. Identical saves do not create snapshots. Retention occurs only after the primary is established. TypeScript submits only fully validated candidates; Rust rechecks the exact current primary, reviewed filenames and candidate bytes under its lock before deletion. Unreviewed, changed, invalid and corrupt-preservation files are not pruned. Retention failures produce a warning rather than falsely reporting an already-committed planner as unsaved.
 
-## Automatic backups and retention
+## Migration
 
-Desktop backup policy is deterministic:
+A valid durable primary wins over legacy data. One-time migration is allowed only when no primary/recovery evidence or completed marker exists. Legacy v2/v1 values are read without changing them; malformed-only legacy data blocks initialization. A valid legacy planner is validated, snapshotted, written and verified before the completion marker. An interrupted marker write is finished on the next valid-primary startup without replaying migration. No WebView profile or legacy planner key is deleted.
 
-- **Routine snapshots** — at most one snapshot of the pre-change primary per local calendar day; newest 30 retained.
-- **Operation snapshots** — verified pre-operation copies for destructive workflows such as full Restore; newest 12 retained.
-- **Corrupt-primary preservation** — an unreadable or invalid primary is copied without modification before repair. Corrupt copies are not silently deleted by routine retention.
+Unrelated browser profiles are never scraped; transfer uses explicit All-data export/Restore.
 
-The primary file is never counted as a backup and retention does not delete the only established valid candidate.
+## Serialized saves and Restore
 
-These snapshots are local recovery aids, not encrypted vaults, remote backups, or a substitute for user-controlled JSON exports.
+All native saves, full Restore, Undo Restore and recovery retirement share one frontend queue and a native session-checked lock. A new WebView bootstrap establishes a new generation: old queued requests are rejected rather than overwriting newer state, while the new frontend can save immediately. This does not add a browser revision/CAS redesign.
 
-## Startup recovery
+The application reports Saved only after the actual durable acknowledgement. Failed ordinary saves retain the newest unsaved state for **Retry save**. Before normal window close, the native shell asks the frontend to drain its queue; a failed outstanding save keeps the window open. Forced termination, OS shutdown and power loss cannot promise delivery of edits not yet acknowledged; recoverable file replacement protects the last committed state.
 
-Desktop startup completes storage bootstrap before React mounts, preventing an empty initial render from overwriting a valid primary.
+Restore uses the App's single validated file-selection path. Preparation creates a verified native operation snapshot. It can be cancelled while waiting/preparing. At commit, cancellation and other planner mutations are disabled. Native commit compares the expected current planner, verifies the pre-operation snapshot, writes the matching Undo record and replaces the primary. React changes its planner only after that commit succeeds. Undo retirement follows successful replacement, not merely an in-memory edit. Desktop Restore and Undo do not require a WebView localStorage recovery write.
 
-Recovery order is:
-
-1. validate the authoritative primary with the shared schema-v2 validators;
-2. when invalid or missing, inspect the recoverable previous file and ordered routine/operation candidates;
-3. skip invalid candidates without deleting them;
-4. select the newest valid candidate;
-5. preserve an invalid primary and repair the primary through the same verified replacement command when the writer is available; and
-6. surface the recovery result and any read-only limitation in the Data panel.
-
-If no valid candidate remains after the one-time migration marker exists, Planner Buckets initializes a new planner rather than resurrecting stale WebView data.
-
-## One-time WebView migration
-
-The desktop shell migrates only when all of these conditions are true:
-
-- no valid durable primary exists;
-- no valid desktop backup exists; and
-- `migration-v1.complete` is absent.
-
-It then evaluates the current desktop WebView's established v2/v1 localStorage through the same validators and deterministic migration used by the browser application. The durable primary is written and verified before the marker is created.
-
-The legacy WebView data is not deleted or overwritten by desktop planner saves. Once the marker exists, the desktop bootstrap will not import that legacy planner again. Browser-to-desktop transfer from an unrelated browser profile still uses explicit **Export All data** and **Restore** because the desktop application does not inspect another browser's profile.
-
-## Restore and Undo Restore
-
-The Data panel parses and validates the selected full-backup JSON before confirmation. In desktop mode, the Confirm Restore action awaits both:
-
-- a verified operation snapshot of the current planner; and
-- a durable Restore-recovery record that fingerprints the replacement planner.
-
-Restore does not begin if that preparation fails. After restart, a matching durable recovery record is mirrored into the existing Undo Restore UI. Undo, dismissal, project import, or a later divergent planner state retires stale recovery state.
-
-Scoped project/bucket/Unassigned exchange files remain import inputs and are rejected by full Restore.
-
-## Multi-instance behavior
-
-The desktop shell acquires one process-lifetime Windows writer mutex for the application identifier. A second process that cannot acquire the writer guard opens with an explicit read-only storage state instead of participating in last-writer-wins file replacement.
-
-Read-only status and the reason are visible in the Data panel. Browser mode is unaffected.
+The installed writer guard is an exclusive OS file handle scoped to the data directory, not a process-global name or lockfile-existence check. Windows releases it on process exit/crash; a second instance remains explicitly read-only. Different isolated test roots do not contend with production storage.
 
 ## Uninstall and lifecycle boundary
 

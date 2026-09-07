@@ -98,6 +98,13 @@ export function StorageStatusCard() {
           {status.warning}
         </p>
       ) : null}
+      {status.phase === 'error' && target?.retry ? (
+        <button type="button" className="secondary-button" onClick={() => {
+          void target.retry?.().catch((error: unknown) => {
+            setStatus((current) => ({ ...current, phase: 'error', error: error instanceof Error ? error.message : String(error) }));
+          });
+        }}>Retry save</button>
+      ) : null}
       {status.error ? (
         <p className="storage-status-error" role="alert">
           {status.error}

@@ -174,12 +174,11 @@ export const loadPlannerDataV2FromLocalStorage = (
  * to the durable file adapter and deliberately leaves legacy WebView storage
  * unchanged after one-time migration.
  */
-export const savePlannerDataV2ToLocalStorage = (data: PlannerDataV2): void => {
+export const savePlannerDataV2ToLocalStorage = (data: PlannerDataV2): void | Promise<void> => {
     if (!isValidPlannerDataV2(data)) {
         throw new Error('Cannot save invalid v2 planner data');
     }
-    if (forwardPlannerSaveToRuntime(data)) {
-        return;
-    }
+    const durable = forwardPlannerSaveToRuntime(data);
+    if (durable !== false) return durable;
     localStorage.setItem(PLANNER_STORAGE_KEY_V2, JSON.stringify(data));
 };

@@ -17,17 +17,18 @@ export const installDesktopCloseGuard = async (
   },
 ): Promise<() => void> => {
   let closing = false;
+  let allowUnload = false;
   const unsubscribe = await subscribe(() => {
     if (closing) return;
     closing = true;
     void (async () => {
-      try { await adapter.flush(); await commands.finish(); }
-      catch (error) { reportFailure(`Close was cancelled: ${error instanceof Error ? error.message : String(error)}`); }
+      try { await adapter.flush(); allowUnload = true; await commands.finish(); }
+      catch (error) { allowUnload = false; reportFailure(`Close was cancelled: ${error instanceof Error ? error.message : String(error)}`); }
       finally { closing = false; }
     })();
   });
   const beforeUnload = (event: BeforeUnloadEvent): void => {
-    if (adapter.getStatus().phase === 'saving' || adapter.getStatus().phase === 'error') {
+    if (!allowUnload && (adapter.getStatus().phase === 'saving' || adapter.getStatus().phase === 'error')) {
       event.preventDefault(); event.returnValue = '';
     }
   };
