@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Planner Buckets — Synthetic Save Fault</title></head>
+  <body>
+    <aside id="acceptance-controls" aria-label="Synthetic acceptance controls" style="position:relative;z-index:1000;padding:12px;background:white;color:black">
+      <strong>SYNTHETIC SAVE FAULT — memory only, not native persistence proof</strong>
+      <p>Wait for Saved, arm one failure, then create a task using the normal App controls. Open Data and use its real Retry save button.</p>
+      <button id="arm-failure" type="button" disabled>Fail next save</button>
+      <span id="fault-state" role="status"></span>
+      <details><summary>Persisted synthetic fixture evidence</summary><pre id="persisted-evidence" style="max-height:220px;overflow:auto;white-space:pre-wrap"></pre></details>
+    </aside>
+    <div id="root"></div>
+    <script type="module" src="./storage-fault.tsx"></script>
+  </body>
+</html>

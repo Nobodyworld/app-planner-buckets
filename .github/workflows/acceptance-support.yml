@@ -1,0 +1,48 @@
+name: Acceptance support
+
+on:
+  pull_request:
+    paths:
+      - 'acceptance/**'
+      - 'scripts/acceptance/**'
+      - '.github/workflows/acceptance-support.yml'
+      - 'src/**'
+      - 'src-tauri/tauri.conf.json'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acceptance-support-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance-support:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Check isolated configuration generator
+        run: node --test scripts/acceptance/native-profile.check.mjs
+      - run: npm ci
+      - name: Typecheck acceptance entry and real application imports
+        run: npx tsc --project acceptance/tsconfig.json
+      - name: Test fault host against real persistence coordinator
+        run: npx vitest run acceptance/storageFaultHost.test.ts
+      - name: Confirm production build excludes fault injection
+        run: |
+          npm run build
+          test ! -e dist/acceptance
+          if grep -R -E 'Synthetic acceptance write failure|SYNTHETIC SAVE FAULT|Next write will fail once' dist; then
+            echo 'Acceptance-only injection was included in the production output.' >&2
+            exit 1
+          fi
+          git diff --exit-code
