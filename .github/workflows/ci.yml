@@ -28,7 +28,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20.19.0
+          node-version: '22'
           cache: npm
 
       - name: Install dependencies
@@ -53,7 +53,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20.19.0
+          node-version: '22'
           cache: npm
 
       - name: Setup Rust toolchain
@@ -73,13 +73,16 @@ jobs:
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
       - name: Lint Rust shell
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
       - name: Test Rust shell
-        run: cargo test --manifest-path src-tauri/Cargo.toml
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
       - name: Build NSIS installer
         run: npm run desktop:build
+
+      - name: Check tracked build inputs remain unchanged
+        run: git diff --exit-code
 
       - name: Prepare installer provenance
         id: installer

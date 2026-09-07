@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>Native acceptance preflight</title></head>
+  <body>
+    <section id="native-preflight" style="padding:24px;font:16px system-ui">
+      <h1>Isolated native acceptance preflight</h1>
+      <p>The planner has NOT started. No legacy WebView data has been read or migrated by this page.</p>
+      <pre id="native-identity" style="white-space:pre-wrap"></pre>
+      <p>Inspect this process's WebView2 --user-data-dir outside the app. It must be within the unique acceptance identity in the manifest, never production.</p>
+      <label><input id="profile-verified" type="checkbox" disabled /> Actual WebView process/profile isolation verified locally</label>
+      <p><button id="seed-legacy" disabled>Seed synthetic v2 legacy planner</button> <button id="start-planner" disabled>Start isolated planner</button></p>
+      <p id="native-preflight-result" role="status"></p>
+    </section>
+    <div id="root"></div>
+    <script type="module" src="./native-start.ts"></script>
+  </body>
+</html>

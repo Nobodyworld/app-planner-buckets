@@ -1,0 +1,151 @@
+name: Windows lifecycle acceptance
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-lifecycle.yml'
+      - 'scripts/acceptance/installed-lifecycle.ps1'
+      - 'src-tauri/**'
+      - 'src/storage/**'
+      - 'src/hooks/usePlannerStoragePersistence.ts'
+      - 'src/App.tsx'
+      - 'src/components/sidepanel/**'
+      - 'src/storageStatus.css'
+      - 'package.json'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  installed-lifecycle:
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout exact lifecycle candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Setup Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal
+          rustup default stable-x86_64-pc-windows-msvc
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build exact NSIS candidate
+        run: npm run desktop:build
+
+      - name: Confirm tracked source stayed unchanged
+        run: git diff --exit-code
+
+      - name: Exercise installed lifecycle
+        id: lifecycle
+        shell: pwsh
+        env:
+          PLANNER_EXPECTED_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          PLANNER_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          $actualSource = (& git rev-parse HEAD).Trim().ToLowerInvariant()
+          $expectedSource = $env:PLANNER_EXPECTED_SOURCE_SHA.ToLowerInvariant()
+          if ($actualSource -ne $expectedSource) {
+            throw "Lifecycle checkout '$actualSource' does not match expected source '$expectedSource'."
+          }
+
+          $installers = @(Get-ChildItem -LiteralPath 'src-tauri/target/release/bundle/nsis' -File -Filter '*-setup.exe')
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one NSIS setup executable; found $($installers.Count)."
+          }
+
+          $installer = $installers[0]
+          $evidence = Join-Path $env:RUNNER_TEMP "planner-buckets-installed-lifecycle-$actualSource-run-$($env:GITHUB_RUN_ID)-attempt-$($env:GITHUB_RUN_ATTEMPT)"
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+
+          & ./scripts/acceptance/installed-lifecycle.ps1 `
+            -InstallerPath $installer.FullName `
+            -EvidenceDirectory $evidence
+
+          $stagedInstaller = Join-Path $evidence $installer.Name
+          Copy-Item -LiteralPath $installer.FullName -Destination $stagedInstaller -Force
+          $installerHash = (Get-FileHash -LiteralPath $stagedInstaller -Algorithm SHA256).Hash.ToLowerInvariant()
+          $candidate = [ordered]@{
+            schemaVersion = 1
+            sourceSha = $actualSource
+            expectedSourceSha = $expectedSource
+            pullRequestBaseSha = $env:PLANNER_PR_BASE_SHA
+            repository = $env:GITHUB_REPOSITORY
+            workflow = $env:GITHUB_WORKFLOW
+            runId = $env:GITHUB_RUN_ID
+            runNumber = $env:GITHUB_RUN_NUMBER
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            runnerOs = $env:RUNNER_OS
+            runnerArch = $env:RUNNER_ARCH
+            runnerImage = $env:ImageOS
+            runnerImageVersion = $env:ImageVersion
+            nodeVersion = (& node --version).Trim()
+            rustcVersion = (& rustc --version).Trim()
+            cargoVersion = (& cargo --version).Trim()
+            installerFile = $installer.Name
+            installerSizeBytes = $installer.Length
+            installerSha256 = $installerHash
+            policy = 'Exact installed lifecycle evidence for this source/run/installer only; not evidence of byte-for-byte reproducibility.'
+          }
+          $candidate | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $evidence 'candidate.json') -Encoding utf8NoBOM
+
+          $artifactName = "planner-buckets-installed-lifecycle-$actualSource-run-$($env:GITHUB_RUN_ID)-attempt-$($env:GITHUB_RUN_ATTEMPT)"
+          "artifact-name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "artifact-path=$evidence" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "installer-file=$($installer.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "installer-size=$($installer.Length)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "installer-sha256=$installerHash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload installed lifecycle evidence
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.lifecycle.outputs.artifact-name }}
+          path: ${{ steps.lifecycle.outputs.artifact-path }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Record lifecycle artifact identity
+        shell: pwsh
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          INSTALLER_FILE: ${{ steps.lifecycle.outputs.installer-file }}
+          INSTALLER_SIZE: ${{ steps.lifecycle.outputs.installer-size }}
+          INSTALLER_SHA256: ${{ steps.lifecycle.outputs.installer-sha256 }}
+        run: |
+          @"
+          ### Retained installed-lifecycle artifact
+
+          | Field | Value |
+          | --- | --- |
+          | Artifact ID | ``$env:ARTIFACT_ID`` |
+          | Artifact archive SHA-256 | ``$env:ARTIFACT_DIGEST`` |
+          | Installer | ``$env:INSTALLER_FILE`` |
+          | Installer size | ``$env:INSTALLER_SIZE bytes`` |
+          | Installer SHA-256 | ``$env:INSTALLER_SHA256`` |
+          | Artifact URL | $env:ARTIFACT_URL |
+          "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY

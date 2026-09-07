@@ -1,0 +1,15 @@
+/* The sidebar owns vertical scrolling. Shrinking an overflow-hidden disclosure
+   clips its controls instead of contributing their full height to that scroller. */
+.sidepanel > .sidebar-disclosure {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 800px) {
+  /* The legacy state selector loads later than component CSS. Use state-specific
+     specificity so focus cannot add five gaps between pointerdown and pointerup. */
+  .workspace-layout .sidepanel.open,
+  .workspace-layout .sidepanel.collapsed {
+    gap: 10px;
+    padding-right: 0;
+  }
+}

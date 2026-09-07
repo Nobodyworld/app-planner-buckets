@@ -26,7 +26,9 @@ import {
   setVisibleBucketTaskSelection,
   toggleTaskSelection,
 } from './services/plannerSelection';
-import { savePlannerDataV2ToLocalStorage, loadPlannerDataV2FromLocalStorage } from './services/plannerPersistence';
+import { loadPlannerDataV2FromLocalStorage } from './services/plannerPersistence';
+import { getPlannerStorageRuntimeTarget, isDesktopPlannerStorage } from './storage/plannerStorageBridge';
+import { usePlannerStoragePersistence } from './hooks/usePlannerStoragePersistence';
 import { plannerReducerV2, type PlannerActionV2 } from './state/plannerReducerV2';
 import {
   copyTextToClipboard,
@@ -317,10 +319,21 @@ export default function App() {
   const [initialLoadResult] = useState(() => loadPlannerDataV2FromLocalStorage());
   const initialProjectId = selectInitialProjectId(initialLoadResult.data.projects);
   const initialProjectName = initialLoadResult.data.projects.find((project) => project.id === initialProjectId)?.name ?? '';
-  const { state, dispatch: dispatchPlanner, canUndo, canRedo, undo, redo } = usePlannerHistory<PlannerData, PlannerActionV2>(
+  const { state, dispatch: dispatchUnchecked, canUndo, canRedo, undo: undoUnchecked, redo: redoUnchecked } = usePlannerHistory<PlannerData, PlannerActionV2>(
     initialLoadResult.data,
     plannerReducerV2,
   );
+  const restoreControl = useRef<AbortController | null>(null);
+  const restorePhaseRef = useRef<'preparing' | 'committing' | null>(null);
+  const mountedRef = useRef(true);
+  const [desktopRestorePhase, setDesktopRestorePhase] = useState<'preparing' | 'committing' | null>(null);
+  const dispatchPlanner = (action: PlannerActionV2) => { if (!restoreControl.current) dispatchUnchecked(action); };
+  const undo = () => { if (!restoreControl.current) undoUnchecked(); };
+  const redo = () => { if (!restoreControl.current) redoUnchecked(); };
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; restoreControl.current?.abort(); };
+  }, []);
   const [activeProjectId, setActiveProjectId] = useState(initialProjectId);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(() => initialLoadResult.data.templates[0]?.id ?? null);
   const [editor, setEditor] = useState<EditorState | null>(null);
@@ -340,7 +353,9 @@ export default function App() {
   const [projectImportDestinationKind, setProjectImportDestinationKind] = useState<'new' | 'existing' | null>(null);
   const [selectedProjectImportDestinationId, setSelectedProjectImportDestinationId] = useState('');
   const [lastRestoreBackup, setLastRestoreBackup] = useState<PlannerData | null>(() => (
-    loadRestoreRecoverySnapshot(localStorage, initialLoadResult.data)?.previousData ?? null
+    isDesktopPlannerStorage()
+      ? getPlannerStorageRuntimeTarget()?.getRestoreRecovery?.(initialLoadResult.data) ?? null
+      : loadRestoreRecoverySnapshot(localStorage, initialLoadResult.data)?.previousData ?? null
   ));
   const [pendingBucketWarp, setPendingBucketWarp] = useState(false);
   const [highlightedBucketId, setHighlightedBucketId] = useState<string | null>(null);
@@ -388,7 +403,7 @@ export default function App() {
   const [settledBucketDropIndex, setSettledBucketDropIndex] = useState<number | null>(null);
   const [settledBucketId, setSettledBucketId] = useState<string | null>(null);
   const [settledBucketFrom, setSettledBucketFrom] = useState<'left' | 'right' | null>(null);
-  const [status, setStatus] = useState('Saved locally');
+  const [status, setStatus] = useState(isDesktopPlannerStorage() ? 'Loading storage…' : 'Saved locally');
   const restoreInputRef = useRef<HTMLInputElement>(null);
   const projectImportInputRef = useRef<HTMLInputElement>(null);
   const quickTaskInputRef = useRef<HTMLInputElement>(null);
@@ -565,18 +580,13 @@ export default function App() {
     state.projects,
   ]);
 
-  useEffect(() => {
-    try {
-      savePlannerDataV2ToLocalStorage(state);
-      setStatus('Saved locally');
-    } catch {
-      setStatus('Could not save locally');
-    }
-  }, [state]);
+  usePlannerStoragePersistence(state, setStatus, desktopRestorePhase !== null);
 
   useEffect(() => {
     if (!lastRestoreBackup) return;
-    const recoverySnapshot = loadRestoreRecoverySnapshot(localStorage, state);
+    const recoverySnapshot = isDesktopPlannerStorage()
+      ? getPlannerStorageRuntimeTarget()?.getRestoreRecovery?.(state)
+      : loadRestoreRecoverySnapshot(localStorage, state);
     if (recoverySnapshot) return;
     setLastRestoreBackup(null);
     setHideRestoreUndoCard(false);
@@ -1537,7 +1547,8 @@ export default function App() {
         (project) => project.id === result.activationProjectId,
       );
 
-      clearRestoreRecoverySnapshot(localStorage);
+      // Desktop recovery retires inside the save queue only after the import commits.
+      if (!isDesktopPlannerStorage()) clearRestoreRecoverySnapshot(localStorage);
       setLastRestoreBackup(null);
       setHideRestoreUndoCard(false);
       setIsRestoreUndoClosing(false);
@@ -1571,8 +1582,54 @@ export default function App() {
     }
   };
 
+  const replaceDesktopPlanner = (replacement: PlannerData, keepUndo: boolean): void => {
+    const target = getPlannerStorageRuntimeTarget();
+    if (!target?.replacePlanner) {
+      setDataActionMessage('Desktop Restore is unavailable; no planner data was replaced.');
+      return;
+    }
+    if (restoreControl.current) return;
+    const controller = new AbortController();
+    const before = state;
+    restoreControl.current = controller;
+    restorePhaseRef.current = 'preparing';
+    setDesktopRestorePhase('preparing');
+    void target.replacePlanner(before, replacement, keepUndo, controller.signal, (phase) => {
+      restorePhaseRef.current = phase;
+      if (mountedRef.current) setDesktopRestorePhase(phase);
+    }).then((committed) => {
+      if (!mountedRef.current) return;
+      if (!committed) { setDataActionMessage('Restore cancelled; the current planner was retained.'); return; }
+      const projectId = selectInitialProjectId(replacement.projects);
+      const project = replacement.projects.find((item) => item.id === projectId);
+      clearWorkspaceTransientState(true);
+      dispatchUnchecked({ type: 'REPLACE_DATA', data: replacement });
+      setLastRestoreBackup(keepUndo ? before : null);
+      setHideRestoreUndoCard(false);
+      setIsRestoreUndoClosing(false);
+      setActiveProjectId(projectId);
+      setQuickTaskProjectId(projectId || null);
+      setQuickTaskProjectName(project?.name ?? '');
+      setQuickTaskBucketId(null);
+      setQuickTaskBucketName('');
+      setQuickTaskMessage(null);
+      clearPendingProjectImport();
+      setPendingRestoreData(null);
+      setDataActionMessage(keepUndo ? 'Restore saved to desktop storage.' : 'Restore undone.');
+    }).catch((error: unknown) => {
+      if (mountedRef.current) setDataActionMessage(`Restore failed: ${error instanceof Error ? error.message : String(error)}`);
+    }).finally(() => {
+      if (restoreControl.current === controller) {
+        restoreControl.current = null;
+        restorePhaseRef.current = null;
+        if (mountedRef.current) setDesktopRestorePhase(null);
+      }
+    });
+  };
+
   const confirmRestoreData = () => {
     if (!pendingRestoreData) return;
+    if (isDesktopPlannerStorage()) { replaceDesktopPlanner(pendingRestoreData, true); return; }
     const recoveryResult = saveRestoreRecoverySnapshot(
       localStorage,
       state,
@@ -1608,6 +1665,7 @@ export default function App() {
 
   const undoRestoreData = () => {
     if (!lastRestoreBackup) return;
+    if (isDesktopPlannerStorage()) { replaceDesktopPlanner(lastRestoreBackup, false); return; }
     const restoredProjectId = selectInitialProjectId(lastRestoreBackup.projects);
     const restoredProject = lastRestoreBackup.projects.find(
       (project) => project.id === restoredProjectId,
@@ -1628,6 +1686,15 @@ export default function App() {
   };
 
   const dismissRestoreUndoCard = () => {
+    if (isDesktopPlannerStorage()) {
+      void getPlannerStorageRuntimeTarget()?.clearRestoreRecovery?.().then(() => {
+        setLastRestoreBackup(null);
+        setHideRestoreUndoCard(true);
+      }).catch((error: unknown) => {
+        setDataActionMessage(`Recovery cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      return;
+    }
     if (isRestoreUndoClosing) return;
     setIsRestoreUndoClosing(true);
     if (restoreUndoCloseTimeoutRef.current !== null) {
@@ -2189,7 +2256,8 @@ export default function App() {
   };
 
   return (
-    <main className="app-shell">
+    <>
+    <main className="app-shell" {...(desktopRestorePhase ? { inert: '' } : {})}>
       {exportNotice && (
         <div
           className="app-notification-banner"
@@ -2769,5 +2837,21 @@ export default function App() {
         </div>
       )}
     </main>
+    {desktopRestorePhase ? (
+      <div className="modal-backdrop" role="presentation">
+        <section className="modal modal-compact" role="dialog" aria-modal="true" aria-label="Durable restore">
+          <h2>{desktopRestorePhase === 'preparing' ? 'Preparing recovery snapshot' : 'Committing Restore'}</h2>
+          <p>{desktopRestorePhase === 'preparing'
+            ? 'The current planner is retained until the replacement is verified.'
+            : 'The native storage transaction is in progress. Cancellation is no longer available.'}</p>
+          <button type="button" autoFocus disabled={desktopRestorePhase === 'committing'}
+            aria-label="Cancel durable restore"
+            onClick={() => { if (restorePhaseRef.current === 'preparing') restoreControl.current?.abort(); }}>
+            Cancel
+          </button>
+        </section>
+      </div>
+    ) : null}
+    </>
   );
 }
