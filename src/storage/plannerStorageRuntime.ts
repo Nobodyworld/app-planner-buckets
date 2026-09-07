@@ -1,27 +1,14 @@
 import { invoke, isTauri } from '@tauri-apps/api/core';
-import {
-  loadPlannerDataV2FromLocalStorage,
-  savePlannerDataV2ToLocalStorage,
-  type PlannerDataV2LoadResult,
-} from '../services/plannerPersistence';
-import {
-  clearRestoreRecoverySnapshot,
-  loadRestoreRecoverySnapshot,
-  RESTORE_RECOVERY_STORAGE_KEY,
-  saveRestoreRecoverySnapshot,
-  type StorageAdapter as RecoveryStorageAdapter,
-} from '../services/restoreRecovery';
+import { createRuntimeInitialPlannerDataV2, loadPlannerDataV2FromLocalStorage, savePlannerDataV2ToLocalStorage, PLANNER_STORAGE_KEY_V1, PLANNER_STORAGE_KEY_V2, type PlannerDataV2LoadResult } from '../services/plannerPersistence';
+import { clearRestoreRecoverySnapshot, fingerprintPlannerData, loadRestoreRecoverySnapshot, RESTORE_RECOVERY_STORAGE_KEY, saveRestoreRecoverySnapshot, type RestoreRecoverySnapshot, type StorageAdapter as RecoveryStorageAdapter } from '../services/restoreRecovery';
+import { migrateV1toV2 } from '../types/migration';
 import type { PlannerDataV2 } from '../types/v2';
-import { isValidPlannerDataV2 } from '../types/validators';
+import { isValidPlannerDataV1, isValidPlannerDataV2 } from '../types/validators';
 
 export type PlannerStorageMode = 'browser-local-storage' | 'desktop-file';
 export type PlannerStorageSavePhase = 'idle' | 'saving' | 'saved' | 'error' | 'read-only';
-export type PlannerStorageLoadSource =
-  | PlannerDataV2LoadResult['source']
-  | 'desktop-primary'
-  | 'desktop-backup'
-  | 'desktop-migrated-webview';
-
+export type PlannerStorageLoadSource = PlannerDataV2LoadResult['source'] | 'desktop-primary' | 'desktop-backup' | 'desktop-migrated-webview';
+export type RestorePhase = 'preparing' | 'committing';
 export interface PlannerStorageStatus {
   mode: PlannerStorageMode;
   writable: boolean;
@@ -32,7 +19,6 @@ export interface PlannerStorageStatus {
   warning: string | null;
   error: string | null;
 }
-
 export interface PlannerStorageSaveResult {
   sequence: number;
   saved: boolean;
@@ -40,7 +26,6 @@ export interface PlannerStorageSaveResult {
   noOp: boolean;
   savedAt: string;
 }
-
 export interface PlannerStorageRuntime {
   adapter: PlannerStorageAdapter;
   data: PlannerDataV2;
@@ -48,508 +33,268 @@ export interface PlannerStorageRuntime {
   warning: string | null;
   restoreRecovery: PlannerDataV2 | null;
 }
-
 export interface PlannerStorageAdapter {
   readonly mode: PlannerStorageMode;
-  getStatus: () => PlannerStorageStatus;
-  subscribe: (listener: (status: PlannerStorageStatus) => void) => () => void;
-  save: (data: PlannerDataV2) => Promise<PlannerStorageSaveResult>;
-  createRestoreRecovery: (
-    previousData: PlannerDataV2,
-    replacementData: PlannerDataV2,
-    createdAt: string,
-  ) => Promise<boolean>;
-  loadRestoreRecovery: (currentData: PlannerDataV2) => Promise<PlannerDataV2 | null>;
-  clearRestoreRecovery: () => Promise<void>;
+  getStatus(): PlannerStorageStatus;
+  subscribe(listener: (status: PlannerStorageStatus) => void): () => void;
+  save(data: PlannerDataV2): Promise<PlannerStorageSaveResult>;
+  flush(): Promise<void>;
+  retry(): Promise<void>;
+  loadRestoreRecovery(data: PlannerDataV2): Promise<PlannerDataV2 | null>;
+  getRestoreRecovery(data: PlannerDataV2): PlannerDataV2 | null;
+  clearRestoreRecovery(): Promise<void>;
+  replacePlanner?(previous: PlannerDataV2, replacement: PlannerDataV2, keepUndo: boolean, signal: AbortSignal, onPhase: (phase: RestorePhase) => void): Promise<boolean>;
 }
-
 export type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-
 interface DesktopCandidate {
   kind: 'primary' | 'previous' | 'routine' | 'operation';
   path: string;
+  name: string;
   serialized: string;
   modifiedAtMs: number;
 }
-
 interface DesktopBootstrapPayload {
   writable: boolean;
   dataPath: string;
   backupPath: string;
   migrationComplete: boolean;
+  session: number;
   primary: DesktopCandidate | null;
   backups: DesktopCandidate[];
   warning: string | null;
 }
-
-interface DesktopSavePayload {
-  sequence: number;
-  saved: boolean;
-  stale: boolean;
-  noOp: boolean;
-  savedAt: string;
-}
-
-interface PendingDesktopSave {
-  data: PlannerDataV2;
-  sequence: number;
-  savedAt: string;
-  resolve: (result: PlannerStorageSaveResult) => void;
-  reject: (error: Error) => void;
-}
-
-const createLocalDay = (date: Date): string => {
-  const year = date.getFullYear().toString().padStart(4, '0');
-  const month = (date.getMonth() + 1).toString().padStart(2, '0');
-  const day = date.getDate().toString().padStart(2, '0');
-  return `${year}-${month}-${day}`;
+const localDay = (date: Date): string => `${date.getFullYear().toString().padStart(4, '0')}-${(date.getMonth() + 1).toString().padStart(2, '0')}-${date.getDate().toString().padStart(2, '0')}`;
+const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const parseObject = (text: string): Record<string, unknown> => {
+  const value: unknown = JSON.parse(text);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Unsupported desktop storage response.');
+  return value as Record<string, unknown>;
 };
-
-const parseJsonObject = (serialized: string, label: string): Record<string, unknown> => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(serialized);
-  } catch {
-    throw new Error(`${label} returned malformed JSON.`);
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`${label} returned an unsupported response.`);
-  }
-  return parsed as Record<string, unknown>;
+const parseCandidate = (value: unknown): DesktopCandidate | null => {
+  if (!value || typeof value !== 'object') return null;
+  const item = value as Partial<DesktopCandidate>;
+  return typeof item.serialized === 'string' && typeof item.path === 'string' && typeof item.kind === 'string' && typeof item.modifiedAtMs === 'number'
+    ? { ...item, name: item.name ?? '' } as DesktopCandidate : null;
 };
-
-const parsePlannerCandidate = (candidate: DesktopCandidate | null): PlannerDataV2 | null => {
+const candidateData = (candidate: DesktopCandidate | null): PlannerDataV2 | null => {
   if (!candidate) return null;
-  try {
-    const parsed: unknown = JSON.parse(candidate.serialized);
-    return isValidPlannerDataV2(parsed) ? parsed as PlannerDataV2 : null;
-  } catch {
-    return null;
-  }
+  try { const data: unknown = JSON.parse(candidate.serialized); return isValidPlannerDataV2(data) ? data as PlannerDataV2 : null; } catch { return null; }
+};
+const memoryStorage = (initial: string | null = null): RecoveryStorageAdapter & { read(): string | null } => {
+  let value = initial;
+  return { getItem: () => value, setItem: (_key, next) => { value = next; }, removeItem: () => { value = null; }, read: () => value };
 };
 
-const isDesktopCandidate = (value: unknown): value is DesktopCandidate => {
-  if (!value || typeof value !== 'object') return false;
-  const candidate = value as Partial<DesktopCandidate>;
-  return (
-    (candidate.kind === 'primary'
-      || candidate.kind === 'previous'
-      || candidate.kind === 'routine'
-      || candidate.kind === 'operation')
-    && typeof candidate.path === 'string'
-    && typeof candidate.serialized === 'string'
-    && typeof candidate.modifiedAtMs === 'number'
-    && Number.isFinite(candidate.modifiedAtMs)
-  );
-};
-
-const parseDesktopBootstrap = (serialized: string): DesktopBootstrapPayload => {
-  const parsed = parseJsonObject(serialized, 'Desktop storage bootstrap');
-  const primary = parsed.primary === null
-    ? null
-    : isDesktopCandidate(parsed.primary)
-      ? parsed.primary
-      : null;
-  const backups = Array.isArray(parsed.backups)
-    ? parsed.backups.filter(isDesktopCandidate)
-    : [];
-
-  if (
-    typeof parsed.writable !== 'boolean'
-    || typeof parsed.dataPath !== 'string'
-    || typeof parsed.backupPath !== 'string'
-    || typeof parsed.migrationComplete !== 'boolean'
-    || (parsed.warning !== null && typeof parsed.warning !== 'string')
-  ) {
-    throw new Error('Desktop storage bootstrap returned incomplete status information.');
-  }
-
-  return {
-    writable: parsed.writable,
-    dataPath: parsed.dataPath,
-    backupPath: parsed.backupPath,
-    migrationComplete: parsed.migrationComplete,
-    primary,
-    backups,
-    warning: parsed.warning as string | null,
-  };
-};
-
-const parseDesktopSave = (serialized: string): DesktopSavePayload => {
-  const parsed = parseJsonObject(serialized, 'Desktop storage save');
-  if (
-    typeof parsed.sequence !== 'number'
-    || typeof parsed.saved !== 'boolean'
-    || typeof parsed.stale !== 'boolean'
-    || typeof parsed.noOp !== 'boolean'
-    || typeof parsed.savedAt !== 'string'
-  ) {
-    throw new Error('Desktop storage save returned incomplete result information.');
-  }
-  return parsed as unknown as DesktopSavePayload;
-};
-
-const createMemoryStorage = (initialValue: string | null = null): RecoveryStorageAdapter & {
-  read: () => string | null;
-} => {
-  let value = initialValue;
-  return {
-    getItem: (key) => key === RESTORE_RECOVERY_STORAGE_KEY ? value : null,
-    setItem: (key, nextValue) => {
-      if (key === RESTORE_RECOVERY_STORAGE_KEY) value = nextValue;
-    },
-    removeItem: (key) => {
-      if (key === RESTORE_RECOVERY_STORAGE_KEY) value = null;
-    },
-    read: () => value,
-  };
-};
-
-const copyStatus = (status: PlannerStorageStatus): PlannerStorageStatus => ({ ...status });
-
-abstract class ObservablePlannerStorageAdapter implements PlannerStorageAdapter {
-  abstract readonly mode: PlannerStorageMode;
+abstract class ObservableStorage {
   protected status: PlannerStorageStatus;
-  private readonly listeners = new Set<(status: PlannerStorageStatus) => void>();
-
-  protected constructor(initialStatus: PlannerStorageStatus) {
-    this.status = initialStatus;
-  }
-
-  getStatus = (): PlannerStorageStatus => copyStatus(this.status);
-
+  private listeners = new Set<(status: PlannerStorageStatus) => void>();
+  constructor(status: PlannerStorageStatus) { this.status = status; }
+  getStatus = (): PlannerStorageStatus => ({ ...this.status });
   subscribe = (listener: (status: PlannerStorageStatus) => void): (() => void) => {
-    this.listeners.add(listener);
-    listener(this.getStatus());
-    return () => this.listeners.delete(listener);
+    this.listeners.add(listener); listener(this.getStatus()); return () => { this.listeners.delete(listener); };
   };
-
-  protected updateStatus(next: Partial<PlannerStorageStatus>): void {
+  protected update(next: Partial<PlannerStorageStatus>): void {
     this.status = { ...this.status, ...next };
-    const snapshot = this.getStatus();
-    this.listeners.forEach((listener) => listener(snapshot));
+    this.listeners.forEach((listener) => listener(this.getStatus()));
   }
-
-  abstract save(data: PlannerDataV2): Promise<PlannerStorageSaveResult>;
-  abstract createRestoreRecovery(
-    previousData: PlannerDataV2,
-    replacementData: PlannerDataV2,
-    createdAt: string,
-  ): Promise<boolean>;
-  abstract loadRestoreRecovery(currentData: PlannerDataV2): Promise<PlannerDataV2 | null>;
-  abstract clearRestoreRecovery(): Promise<void>;
 }
-
-export class BrowserPlannerStorageAdapter extends ObservablePlannerStorageAdapter {
+export class BrowserPlannerStorageAdapter extends ObservableStorage implements PlannerStorageAdapter {
   readonly mode = 'browser-local-storage' as const;
   private sequence = 0;
-
-  constructor(private readonly storage: RecoveryStorageAdapter = localStorage) {
-    super({
-      mode: 'browser-local-storage',
-      writable: true,
-      phase: 'idle',
-      dataPath: null,
-      backupPath: null,
-      lastSavedAt: null,
-      warning: null,
-      error: null,
-    });
+  private unsaved: PlannerDataV2 | null = null;
+  constructor(private storage: RecoveryStorageAdapter = localStorage) {
+    super({ mode: 'browser-local-storage', writable: true, phase: 'idle', dataPath: null, backupPath: null, lastSavedAt: null, warning: null, error: null });
   }
-
   save = async (data: PlannerDataV2): Promise<PlannerStorageSaveResult> => {
-    const sequence = ++this.sequence;
-    const savedAt = new Date().toISOString();
-    this.updateStatus({ phase: 'saving', error: null });
+    this.unsaved = data; this.update({ phase: 'saving', error: null });
     try {
       savePlannerDataV2ToLocalStorage(data);
-      this.updateStatus({ phase: 'saved', lastSavedAt: savedAt, error: null });
-      return { sequence, saved: true, stale: false, noOp: false, savedAt };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Browser storage could not save planner data.';
-      this.updateStatus({ phase: 'error', error: message });
-      throw new Error(message);
-    }
+      const savedAt = new Date().toISOString(); this.unsaved = null;
+      this.update({ phase: 'saved', lastSavedAt: savedAt, error: null });
+      return { sequence: ++this.sequence, saved: true, stale: false, noOp: false, savedAt };
+    } catch (error) { this.update({ phase: 'error', error: messageOf(error) }); throw error; }
   };
-
-  createRestoreRecovery = async (
-    previousData: PlannerDataV2,
-    replacementData: PlannerDataV2,
-    createdAt: string,
-  ): Promise<boolean> => (
-    saveRestoreRecoverySnapshot(
-      this.storage,
-      previousData,
-      replacementData,
-      createdAt,
-    ).ok
-  );
-
-  loadRestoreRecovery = async (currentData: PlannerDataV2): Promise<PlannerDataV2 | null> => (
-    loadRestoreRecoverySnapshot(this.storage, currentData)?.previousData ?? null
-  );
-
-  clearRestoreRecovery = async (): Promise<void> => {
-    clearRestoreRecoverySnapshot(this.storage);
-  };
+  flush = async (): Promise<void> => { if (this.unsaved) throw new Error(this.status.error ?? 'Planner changes are not saved.'); };
+  retry = async (): Promise<void> => { if (this.unsaved) await this.save(this.unsaved); };
+  loadRestoreRecovery = async (data: PlannerDataV2): Promise<PlannerDataV2 | null> => this.getRestoreRecovery(data);
+  getRestoreRecovery = (data: PlannerDataV2): PlannerDataV2 | null => loadRestoreRecoverySnapshot(this.storage, data)?.previousData ?? null;
+  clearRestoreRecovery = async (): Promise<void> => { clearRestoreRecoverySnapshot(this.storage); };
 }
 
-export class DesktopPlannerStorageAdapter extends ObservablePlannerStorageAdapter {
+/** All desktop mutations, including Restore and recovery cleanup, use this one queue. */
+export class DesktopPlannerStorageAdapter extends ObservableStorage implements PlannerStorageAdapter {
   readonly mode = 'desktop-file' as const;
-  private nextSequence = 0;
-  private pending: PendingDesktopSave | null = null;
-  private draining = false;
-
-  constructor(
-    private readonly invokeCommand: TauriInvoke,
-    status: Pick<PlannerStorageStatus, 'writable' | 'dataPath' | 'backupPath' | 'warning'>,
-  ) {
-    super({
-      mode: 'desktop-file',
-      writable: status.writable,
-      phase: status.writable ? 'idle' : 'read-only',
-      dataPath: status.dataPath,
-      backupPath: status.backupPath,
-      lastSavedAt: null,
-      warning: status.warning,
-      error: null,
-    });
+  private sequence = 0;
+  private tail: Promise<void> = Promise.resolve();
+  private unsaved: PlannerDataV2 | null = null;
+  private recovery: RestoreRecoverySnapshot | null = null;
+  private readonly session: number;
+  constructor(private invokeCommand: TauriInvoke, status: Pick<PlannerStorageStatus, 'writable' | 'dataPath' | 'backupPath' | 'warning'> & { session: number }) {
+    super({ mode: 'desktop-file', ...status, phase: status.writable ? 'idle' : 'read-only', lastSavedAt: null, error: null });
+    this.session = status.session;
   }
-
-  save = (data: PlannerDataV2): Promise<PlannerStorageSaveResult> => {
-    if (!isValidPlannerDataV2(data)) {
-      return Promise.reject(new Error('Cannot save invalid v2 planner data.'));
-    }
-    if (!this.status.writable) {
-      const error = this.status.warning ?? 'Desktop storage is read-only.';
-      this.updateStatus({ phase: 'read-only', error });
-      return Promise.reject(new Error(error));
-    }
-
-    const sequence = ++this.nextSequence;
+  private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(operation);
+    this.tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+  private writable(): void { if (!this.status.writable) throw new Error(this.status.warning ?? 'Desktop storage is read-only.'); }
+  private async write(data: PlannerDataV2): Promise<PlannerStorageSaveResult> {
+    const serialized = JSON.stringify(data);
     const savedAt = new Date().toISOString();
-    return new Promise((resolve, reject) => {
-      if (this.pending) {
-        this.pending.resolve({
-          sequence: this.pending.sequence,
-          saved: false,
-          stale: true,
-          noOp: true,
-          savedAt: this.pending.savedAt,
-        });
-      }
-      this.pending = { data, sequence, savedAt, resolve, reject };
-      void this.drain();
+    const sequence = ++this.sequence;
+    const value = parseObject(await this.invokeCommand<string>('desktop_storage_save', { serialized, sequence, session: this.session, localDay: localDay(new Date(savedAt)), savedAt }));
+    if (value.stale === true || value.saved !== true || value.sequence !== sequence || typeof value.savedAt !== 'string') throw new Error('Desktop storage rejected a stale or unverified save. Reload the application before retrying.');
+    if (typeof value.warning === 'string') this.update({ warning: value.warning });
+    return value as unknown as PlannerStorageSaveResult;
+  }
+  private async retireRecovery(data: PlannerDataV2): Promise<void> {
+    if (!this.recovery || this.recovery.replacementFingerprint === fingerprintPlannerData(data)) return;
+    try {
+      await this.invokeCommand('desktop_storage_clear_restore_recovery', { session: this.session });
+      this.recovery = null;
+    } catch (error) { this.update({ warning: `Planner was saved; stale recovery cleanup failed: ${messageOf(error)}` }); }
+  }
+  private async prune(data: PlannerDataV2): Promise<void> {
+    try {
+      const raw = await this.invokeCommand<string>('desktop_storage_list_backups', { session: this.session });
+      const values: unknown = JSON.parse(raw);
+      if (!Array.isArray(values)) throw new Error('Invalid backup inventory.');
+      const candidates = values.map(parseCandidate).filter((item): item is DesktopCandidate => Boolean(item))
+        .filter((item) => (item.kind === 'routine' || item.kind === 'operation') && candidateData(item));
+      // Only candidates accepted by the canonical schema/integrity validator may be pruned.
+      // Rust rechecks the exact bytes under its lock before removing any reviewed name.
+      await this.invokeCommand('desktop_storage_prune_backups', { session: this.session, request: JSON.stringify({ current: JSON.stringify(data), candidates: candidates.map(({ name, serialized }) => ({ name, serialized })) }) });
+    } catch (error) { this.update({ warning: `Planner was saved; backup retention was deferred: ${messageOf(error)}` }); }
+  }
+  save = (data: PlannerDataV2): Promise<PlannerStorageSaveResult> => {
+    if (!isValidPlannerDataV2(data)) return Promise.reject(new Error('Cannot save invalid v2 planner data.'));
+    if (!this.status.writable) return Promise.reject(new Error(this.status.warning ?? 'Desktop storage is read-only.'));
+    // Capture immutable bytes now, not a mutable caller-owned object at queue execution time.
+    const captured = JSON.parse(JSON.stringify(data)) as PlannerDataV2;
+    this.unsaved = captured;
+    this.update({ phase: 'saving', error: null });
+    return this.enqueue(async () => {
+      try {
+        const result = await this.write(captured);
+        await this.retireRecovery(captured);
+        if (!result.noOp) await this.prune(captured);
+        if (this.unsaved === captured) {
+          this.unsaved = null;
+          this.update({ phase: 'saved', error: null, lastSavedAt: result.savedAt });
+        }
+        return result;
+      } catch (error) { this.update({ phase: 'error', error: messageOf(error) }); throw error; }
     });
   };
-
-  private async drain(): Promise<void> {
-    if (this.draining) return;
-    this.draining = true;
-    try {
-      while (this.pending) {
-        const pending = this.pending;
-        this.pending = null;
-        this.updateStatus({ phase: 'saving', error: null });
-        try {
-          const serialized = await this.invokeCommand<string>('desktop_storage_save', {
-            serialized: JSON.stringify(pending.data),
-            sequence: pending.sequence,
-            localDay: createLocalDay(new Date(pending.savedAt)),
-            savedAt: pending.savedAt,
-          });
-          const result = parseDesktopSave(serialized);
-          if (!result.stale) {
-            this.updateStatus({
-              phase: 'saved',
-              lastSavedAt: result.savedAt,
-              error: null,
-            });
-          }
-          pending.resolve(result);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.updateStatus({ phase: 'error', error: message });
-          pending.reject(new Error(message));
-        }
-      }
-    } finally {
-      this.draining = false;
-      if (this.pending) void this.drain();
-    }
-  }
-
-  createRestoreRecovery = async (
-    previousData: PlannerDataV2,
-    replacementData: PlannerDataV2,
-    createdAt: string,
-  ): Promise<boolean> => {
-    const memory = createMemoryStorage();
-    const snapshot = saveRestoreRecoverySnapshot(
-      memory,
-      previousData,
-      replacementData,
-      createdAt,
-    );
-    const serializedRecovery = memory.read();
-    if (!snapshot.ok || !serializedRecovery) return false;
-
-    try {
-      await this.invokeCommand<string>('desktop_storage_create_operation_snapshot', {
-        serialized: JSON.stringify(previousData),
-        reason: 'restore',
-        timestamp: createdAt,
-      });
-      await this.invokeCommand<void>('desktop_storage_write_restore_recovery', {
-        serialized: serializedRecovery,
-      });
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.updateStatus({ phase: 'error', error: message });
-      return false;
-    }
+  flush = async (): Promise<void> => {
+    for (;;) { const tail = this.tail; await tail; if (tail === this.tail) break; }
+    if (this.unsaved) throw new Error(this.status.error ?? 'Planner changes have not been saved.');
   };
-
-  loadRestoreRecovery = async (currentData: PlannerDataV2): Promise<PlannerDataV2 | null> => {
-    let serialized: string | null;
-    try {
-      serialized = await this.invokeCommand<string | null>('desktop_storage_read_restore_recovery');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.updateStatus({ phase: 'error', error: message });
-      return null;
-    }
-    if (!serialized) return null;
-
-    const memory = createMemoryStorage(serialized);
-    const snapshot = loadRestoreRecoverySnapshot(memory, currentData);
-    if (snapshot) return snapshot.previousData;
-
-    try {
-      await this.invokeCommand<void>('desktop_storage_clear_restore_recovery');
-    } catch {
-      // Stale recovery cleanup is best effort; validated planner loading continues.
-    }
-    return null;
+  retry = async (): Promise<void> => {
+    if (this.unsaved) await this.save(this.unsaved);
+    else if (this.status.error) throw new Error('Retry the failed operation; the previous planner is unchanged.');
   };
-
-  clearRestoreRecovery = async (): Promise<void> => {
-    try {
-      await this.invokeCommand<void>('desktop_storage_clear_restore_recovery');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.updateStatus({ phase: 'error', error: message });
-      throw new Error(message);
-    }
+  getRestoreRecovery = (data: PlannerDataV2): PlannerDataV2 | null => this.recovery?.replacementFingerprint === fingerprintPlannerData(data) ? this.recovery.previousData : null;
+  loadRestoreRecovery = async (data: PlannerDataV2): Promise<PlannerDataV2 | null> => {
+    const serialized = await this.invokeCommand<string | null>('desktop_storage_read_restore_recovery', { session: this.session });
+    this.recovery = serialized ? loadRestoreRecoverySnapshot(memoryStorage(serialized), data) : null;
+    // Invalid/mismatching records are not applied, but read-only bootstrap never deletes files.
+    return this.getRestoreRecovery(data);
+  };
+  clearRestoreRecovery = (): Promise<void> => this.enqueue(async () => {
+    this.writable();
+    await this.invokeCommand('desktop_storage_clear_restore_recovery', { session: this.session });
+    this.recovery = null;
+  });
+  replacePlanner = (previous: PlannerDataV2, replacement: PlannerDataV2, keepUndo: boolean, signal: AbortSignal, onPhase: (phase: RestorePhase) => void): Promise<boolean> => {
+    if (!isValidPlannerDataV2(previous) || !isValidPlannerDataV2(replacement)) return Promise.reject(new Error('Restore requires valid complete planner data.'));
+    const before = JSON.parse(JSON.stringify(previous)) as PlannerDataV2;
+    const after = JSON.parse(JSON.stringify(replacement)) as PlannerDataV2;
+    return this.enqueue(async () => {
+      this.writable();
+      if (signal.aborted) return false;
+      onPhase('preparing');
+      const createdAt = new Date().toISOString();
+      try {
+        // Ordinary saves ahead of this transaction have drained. CAS in Rust also checks
+        // the actual primary, so a stale UI cannot replace a newer durable planner.
+        const receipt = parseObject(await this.invokeCommand<string>('desktop_storage_create_operation_snapshot', { serialized: JSON.stringify(before), reason: keepUndo ? 'restore' : 'undo-restore', timestamp: createdAt, session: this.session }));
+        if (signal.aborted) return false;
+        const memory = memoryStorage();
+        const prepared = saveRestoreRecoverySnapshot(memory, before, after, createdAt);
+        if (!prepared.ok) throw new Error('Could not validate the Restore recovery snapshot.');
+        onPhase('committing');
+        // Cancellation is deliberately unavailable after this atomic native transaction starts.
+        const result = parseObject(await this.invokeCommand<string>('desktop_storage_commit_restore', { session: this.session, request: JSON.stringify({ sequence: ++this.sequence, expected: JSON.stringify(before), serialized: JSON.stringify(after), snapshotName: receipt.name, recovery: keepUndo ? memory.read() : null, localDay: localDay(new Date(createdAt)), savedAt: createdAt }) }));
+        if (result.saved !== true || result.sequence !== this.sequence) throw new Error('Restore did not return a verified commit.');
+        this.recovery = keepUndo ? prepared.snapshot : null;
+        this.unsaved = null;
+        this.update({ phase: 'saved', lastSavedAt: createdAt, error: null, ...(typeof result.warning === 'string' ? { warning: result.warning } : {}) });
+        await this.prune(after);
+        return true;
+      } catch (error) { this.update({ phase: 'error', error: messageOf(error) }); throw error; }
+    });
   };
 }
 
-const selectNewestValidBackup = (backups: DesktopCandidate[]): {
-  candidate: DesktopCandidate;
-  data: PlannerDataV2;
-} | null => {
-  const ordered = [...backups].sort((left, right) => right.modifiedAtMs - left.modifiedAtMs);
-  for (const candidate of ordered) {
-    const data = parsePlannerCandidate(candidate);
-    if (data) return { candidate, data };
+/** Read migration inputs without writing, deleting or repairing WebView storage. */
+export const loadLegacyDesktopPlanner = (): PlannerDataV2LoadResult => {
+  const rawV2 = localStorage.getItem(PLANNER_STORAGE_KEY_V2);
+  const rawV1 = localStorage.getItem(PLANNER_STORAGE_KEY_V1);
+  if (rawV2 !== null) {
+    try { const value: unknown = JSON.parse(rawV2); if (isValidPlannerDataV2(value)) return { data: value as PlannerDataV2, source: 'v2', warning: null }; } catch { /* Try the independently preserved v1 source. */ }
   }
-  return null;
+  if (rawV1 !== null) {
+    try {
+      const value: unknown = JSON.parse(rawV1);
+      if (isValidPlannerDataV1(value)) { const data = migrateV1toV2(value); if (isValidPlannerDataV2(data)) return { data, source: 'migrated-v1', warning: rawV2 !== null ? 'Invalid legacy v2 data was left intact; migration used valid v1 data.' : null }; }
+    } catch { /* Fail closed below, never initialize over malformed legacy data. */ }
+  }
+  if (rawV1 !== null || rawV2 !== null) throw new Error('Legacy desktop planner data is invalid. Migration was stopped and the original WebView values were preserved.');
+  return { data: createRuntimeInitialPlannerDataV2(), source: 'new', warning: null };
 };
-
-const recoverDesktopPrimary = async (
-  invokeCommand: TauriInvoke,
-  data: PlannerDataV2,
-  timestamp: string,
-): Promise<void> => {
-  await invokeCommand<string>('desktop_storage_recover', {
-    serialized: JSON.stringify(data),
-    localDay: createLocalDay(new Date(timestamp)),
-    timestamp,
-  });
-};
-
-export const bootstrapDesktopPlannerStorage = async (
-  invokeCommand: TauriInvoke = invoke,
-  loadBrowserData: () => PlannerDataV2LoadResult = loadPlannerDataV2FromLocalStorage,
-  createTimestamp: () => string = () => new Date().toISOString(),
-): Promise<PlannerStorageRuntime> => {
-  const bootstrapSerialized = await invokeCommand<string>('desktop_storage_bootstrap');
-  const bootstrap = parseDesktopBootstrap(bootstrapSerialized);
-  const adapter = new DesktopPlannerStorageAdapter(invokeCommand, {
-    writable: bootstrap.writable,
-    dataPath: bootstrap.dataPath,
-    backupPath: bootstrap.backupPath,
-    warning: bootstrap.warning,
-  });
-  const validPrimary = parsePlannerCandidate(bootstrap.primary);
-
-  let data: PlannerDataV2;
-  let source: PlannerStorageLoadSource;
+export const bootstrapDesktopPlannerStorage = async (invokeCommand: TauriInvoke = invoke, loadBrowserData: () => PlannerDataV2LoadResult = loadLegacyDesktopPlanner, createTimestamp: () => string = () => new Date().toISOString()): Promise<PlannerStorageRuntime> => {
+  const value = parseObject(await invokeCommand<string>('desktop_storage_bootstrap'));
+  if (typeof value.writable !== 'boolean' || typeof value.dataPath !== 'string' || typeof value.backupPath !== 'string' || typeof value.migrationComplete !== 'boolean' || !Number.isSafeInteger(value.session) || Number(value.session) < 1 || !Array.isArray(value.backups)) throw new Error('Incomplete desktop storage bootstrap response.');
+  const bootstrap: DesktopBootstrapPayload = { writable: value.writable, dataPath: value.dataPath, backupPath: value.backupPath, migrationComplete: value.migrationComplete, session: Number(value.session), primary: parseCandidate(value.primary), backups: value.backups.map(parseCandidate).filter((item): item is DesktopCandidate => Boolean(item)), warning: typeof value.warning === 'string' ? value.warning : null };
+  let data = candidateData(bootstrap.primary);
+  let source: PlannerStorageLoadSource = 'desktop-primary';
   let warning = bootstrap.warning;
-
-  if (validPrimary) {
-    data = validPrimary;
-    source = 'desktop-primary';
-  } else {
-    const validBackup = selectNewestValidBackup(bootstrap.backups);
-    if (validBackup) {
-      data = validBackup.data;
-      source = 'desktop-backup';
-      const recoveryWarning = bootstrap.primary
-        ? `The desktop planner file was invalid. Recovery selected the newest valid backup (${validBackup.candidate.kind}).`
-        : `The desktop planner file was missing. Recovery selected the newest valid backup (${validBackup.candidate.kind}).`;
-      warning = warning ? `${warning} ${recoveryWarning}` : recoveryWarning;
-      if (bootstrap.writable) {
-        await recoverDesktopPrimary(invokeCommand, data, createTimestamp());
-      } else {
-        warning = `${warning} This read-only instance could not repair the primary file.`;
-      }
+  if (!data) {
+    const ordered = [...bootstrap.backups].sort((a, b) => b.modifiedAtMs - a.modifiedAtMs || a.path.localeCompare(b.path));
+    const backup = ordered.find((item) => candidateData(item));
+    if (backup) {
+      data = candidateData(backup)!; source = 'desktop-backup';
+      warning = [warning, `Recovery selected the newest valid backup (${backup.kind}).`].filter(Boolean).join(' ');
+      if (bootstrap.writable) await invokeCommand('desktop_storage_recover', { serialized: JSON.stringify(data), localDay: localDay(new Date(createTimestamp())), timestamp: createTimestamp(), session: bootstrap.session });
+      else warning += ' This read-only instance could not repair the primary file.';
     } else {
-      const browserLoad = loadBrowserData();
-      data = browserLoad.data;
-      source = browserLoad.source === 'new'
-        ? 'new'
-        : 'desktop-migrated-webview';
-      warning = [warning, browserLoad.warning].filter(Boolean).join(' ') || null;
-
+      // A missing primary after migration or any invalid durable evidence is recovery,
+      // not first run. Preserve everything and require an explicit recovery decision.
+      if (bootstrap.migrationComplete || value.primary !== null || value.backups.length > 0) throw new Error('No valid durable planner remains. Startup stopped without replacing files or re-importing stale WebView data. Restore from an external backup in an isolated recovery workflow.');
+      const legacy = loadBrowserData();
+      data = legacy.data;
+      if (!isValidPlannerDataV2(data)) throw new Error('Migration source failed planner validation.');
+      source = legacy.source === 'new' ? 'new' : 'desktop-migrated-webview';
+      warning = [warning, legacy.warning].filter(Boolean).join(' ') || null;
       if (bootstrap.writable) {
         const timestamp = createTimestamp();
-        await recoverDesktopPrimary(invokeCommand, data, timestamp);
-        if (!bootstrap.migrationComplete) {
-          await invokeCommand<void>('desktop_storage_mark_migration_complete');
-        }
-        if (browserLoad.source !== 'new') {
-          const migrationWarning = 'Legacy WebView planner data was copied into durable desktop file storage. The legacy browser copy was preserved.';
-          warning = warning ? `${warning} ${migrationWarning}` : migrationWarning;
-        }
-      } else {
-        const readOnlyWarning = 'No valid desktop file was available, so this read-only instance is using the browser fallback in memory and cannot persist changes.';
-        warning = warning ? `${warning} ${readOnlyWarning}` : readOnlyWarning;
-      }
+        if (legacy.source !== 'new') await invokeCommand('desktop_storage_create_operation_snapshot', { serialized: JSON.stringify(data), reason: 'migration', timestamp, session: bootstrap.session });
+        await invokeCommand('desktop_storage_recover', { serialized: JSON.stringify(data), localDay: localDay(new Date(timestamp)), timestamp, session: bootstrap.session });
+        if (legacy.source !== 'new') warning = [warning, 'Legacy WebView data was migrated; the legacy browser copy was preserved.'].filter(Boolean).join(' ');
+      } else warning = [warning, 'No durable primary exists yet; this instance is read-only and cannot persist changes.'].filter(Boolean).join(' ');
     }
   }
-
+  // Also finish an interrupted marker write when a valid durable primary already exists.
+  if (bootstrap.writable && !bootstrap.migrationComplete) await invokeCommand('desktop_storage_mark_migration_complete', { session: bootstrap.session });
+  const adapter = new DesktopPlannerStorageAdapter(invokeCommand, { ...bootstrap, warning });
   const restoreRecovery = await adapter.loadRestoreRecovery(data);
   return { adapter, data, source, warning, restoreRecovery };
 };
-
 export const bootstrapBrowserPlannerStorage = (): PlannerStorageRuntime => {
-  const load = loadPlannerDataV2FromLocalStorage();
+  const loaded = loadPlannerDataV2FromLocalStorage();
   const adapter = new BrowserPlannerStorageAdapter();
-  const restoreRecovery = loadRestoreRecoverySnapshot(localStorage, load.data)?.previousData ?? null;
-  return {
-    adapter,
-    data: load.data,
-    source: load.source,
-    warning: load.warning,
-    restoreRecovery,
-  };
+  return { adapter, ...loaded, restoreRecovery: adapter.getRestoreRecovery(loaded.data) };
 };
-
-export const bootstrapPlannerStorageRuntime = async (): Promise<PlannerStorageRuntime> => {
-  if (isTauri()) {
-    return bootstrapDesktopPlannerStorage();
-  }
-  return bootstrapBrowserPlannerStorage();
-};
+export const bootstrapPlannerStorageRuntime = async (): Promise<PlannerStorageRuntime> => isTauri() ? bootstrapDesktopPlannerStorage() : bootstrapBrowserPlannerStorage();
