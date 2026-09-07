@@ -3,3 +3,13 @@
 .sidepanel > .sidebar-disclosure {
   flex: 0 0 auto;
 }
+
+@media (max-width: 800px) {
+  /* Both states show cards on narrow screens. Focus opens the desktop state;
+     keep identical geometry so a first pointer click does not move its target. */
+  .sidepanel.open,
+  .sidepanel.collapsed {
+    gap: 10px;
+    padding-right: 0;
+  }
+}
