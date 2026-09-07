@@ -1,60 +1,71 @@
 # Focused storage acceptance
 
-PR #82 / #40 uses `slice/durable-desktop-persistence`. This support removes test-access gaps, not acceptance gates. Read `AGENTS.md` and current PR evidence. Preserve the primary checkout, stashes, rescue refs and artifacts; use one owned exact-head worktree.
+PR #82 / #40 uses `slice/durable-desktop-persistence`. Read `AGENTS.md` and the current PR evidence for the exact head and installer. Preserve the primary checkout, stashes, rescue refs and artifacts; use one owned exact-head worktree. Do not restart the implementation or repeat unaffected acceptance matrices.
 
-## Evidence retained
+## Evidence already supplied
 
-The owner-supplied Codex report at `3666d4c6f640144a66f1345c151a54aa7dca60eb` reports 551 frontend tests, 15 Rust tests, compilation, diff checks and normal browser status/Restore/Undo/reload/containment PASS. An initial run failed 13 tests during concurrent Rust compilation, then passed unchanged. The cause is **not established**; preserve both logs and run subsequent validation sequentially, not repeatedly until green. The connector received the report, not the workstation-only logs. #85 owns the high npm finding; #60 remains NOT RUN.
+At `bbc25d8965f77fe743122b2d48ef73e7c28ed880`, local Codex reported browser fault/Retry PASS and actual Windows application-data plus child WebView2-profile isolation. Synthetic native migration/source preservation, save/restart, failed-save/Retry, failed-close protection, first save after same-process WebView reload, second-writer exclusion at preflight, persisted Restore/Undo replay, corrupt-primary recovery and no-valid-candidate preservation passed. These are supplied local observations, not connector execution.
 
-## Browser save-fault check
+Limitations are retained: the second planner UI was not started; a separate restart immediately after Undo was not isolated; recovery restored only the selected backup's contents; precise live in-flight-close timing and immediate post-reload timing were not captured. Production-identity installer lifecycle #60 was NOT RUN.
 
-From the owned worktree, in a synthetic isolated browser context:
+The retained synthetic profile deliberately contains invalid no-candidate test state. Its originals and configuration were preserved outside Git. Do not treat that profile as a fresh fixture, overwrite it, or delete it incidentally. Create a new isolated identity for presentation retesting.
+
+The earlier 13 failures at 3666d4c were investigated: ten 5-second timeouts, one missing duplicate-project option and two incorrect-result assertions, followed by an unchanged 551-test pass. Cause remains unestablished. Both original logs/hashes are retained. Run diagnostics sequentially; do not weaken assertions, increase timeouts indiscriminately or rerun until green. #80 owns historical act warnings; #85 owns the current audit finding.
+
+## Data pointer reachability correction
+
+Expanded disclosures used to flex-shrink while hiding overflow. The sidebar now retains each disclosure's intrinsic height and owns scrolling. The production change is scoped to `SidebarDisclosure.css` and its import; storage protocols and native configuration are unchanged.
+
+`data-panel.browser.mjs` tests the actual App at 1280x720, 1440x900, 960x640 and 700x900 using a clean Playwright context per viewport. It checks geometry and center-point hit testing, clicks Retry, and uses normal browser Restore/Undo. A negative control restores the old flex rule to demonstrate the original clipping. CI retains screenshots and structured results outside the repository. Headless Chromium is not installed WebView2 evidence.
+
+Local residual: verify Data scrolling and pointer access to Retry, Restore and Undo in the isolated Windows shell at default desktop size and its minimum supported size. Do not repeat migration, corruption, backup, ordinary browser or historical zoom/drag matrices unless source changes affect those behaviors.
+
+## Deterministic close/reload timing evidence
+
+`acceptance/storageLifecycleTiming.test.ts` composes the real desktop adapter, queue, bootstrap and close guard against a controlled native-command boundary. Deferred promises, not human click speed or sleeps, test:
+
+- close while a write is active and a newer save is queued;
+- a save appended while close/flush is already waiting;
+- a failing in-flight save that must not acknowledge close until Retry succeeds;
+- sequence-one save immediately after a new bootstrap session and obsolete-adapter rejection.
+
+Run `npx vitest run acceptance/storageLifecycleTiming.test.ts` when diagnosing these contracts. Pair results with the native Rust session tests and the supplied native close/reload observations. These are deterministic protocol tests, not a measured Windows IPC race. Do not relabel the two unobserved live timing cases as native PASS. Further live timing instrumentation is required only if the evidence exposes an unexplained contract discrepancy or the final reviewer requests a specific missing native observation; do not send the owner back to manually time races.
+
+## Browser save-fault page
+
+From the owned worktree in an isolated synthetic browser context:
 
 ```text
 npm ci
 npm run dev -- --mode acceptance --host localhost --port 5179 --strictPort
 ```
 
-Open `http://localhost:5179/acceptance/storage-fault.html`. This dev-only entry loads the real App, desktop coordinator and Data retry UI, replacing only native invoke with a labelled in-memory host. It does not call Rust or persist planner data to disk. Normal preferences belong to this isolated browser context.
-
-1. Wait for Saved; record the inspector's persisted synthetic planner.
-2. Select **Fail next save**, then create a task using the normal App Add controls.
-3. Open Data. Verify an error rather than false Saved, and a real **Retry save** button. The inspector must still contain the preceding persisted state.
-4. Use **Retry save**. Verify Saved, the latest pending task in the persisted inspector, and exactly one injected failure. Capture error/recovered screenshots and console evidence.
-
-Do not test Restore or claim native disk/backup behavior here: unsupported host commands reject. Reload resets the fixture. The entry refuses non-loopback, production and Tauri contexts and is not imported by production index/main. CI typechecks acceptance entries, tests the host with the real coordinator, and checks fault text is absent from the production bundle.
+Open `http://localhost:5179/acceptance/storage-fault.html`. Wait for Saved, record the persisted inspector, arm one failure and create a task. Data must show an error and real Retry save. Persisted bytes must remain unchanged until pointer-activated Retry succeeds and saves the pending task. This page uses the real App/coordinator but an in-memory command host; it cannot prove native disk behavior. Use the normal application for Restore, not unsupported fault-host commands. Production builds exclude this entry.
 
 ## Native profile preparation
 
-Tauri's `--config` supports a separate application identifier; the repository resolves durable storage using `app_local_data_dir()`, with a configured relative WebView directory `webview`. Production source/configuration remains unchanged.
-
-Official references:
-- https://v2.tauri.app/develop/configuration-files/
-- https://v2.tauri.app/reference/config/#identifier
-- https://v2.tauri.app/reference/config/#datadirectory
-
-On Windows, from the clean owned worktree:
+On Windows, from a clean owned worktree at the current exact head:
 
 ```text
 node --test scripts/acceptance/native-profile.check.mjs
 node scripts/acceptance/native-profile.mjs . <exact-current-head>
 ```
 
-The generator verifies source/origin/cleanliness, rejects common environment overrides and unreviewed platform config, and writes a unique configuration plus hashed manifest under OS temp. It never launches, installs, deletes or changes production config. It explicitly reports **configuration prepared, runtime isolation not yet proven**. The generated title/identifier is unique and bundling is disabled.
+The generator creates a unique Tauri identity and external hashed config/manifest; it does not launch or install anything. Inspect its hashes and known `TAURI_CONFIG`/`WEBVIEW2_*` environment and registry/policy overrides before launch. Do not alter machine-wide settings or bypass policy. Start only with the printed explicit config command; a code worktree alone does not isolate application data.
 
-Before using the printed `npm run desktop:dev -- --config "<config-file>"` command, inspect config/manifest hashes and confirm no production identifier/path or altered capability. Recheck `TAURI_CONFIG`, all `WEBVIEW2_*` variables and applicable registry/policy overrides (especially UserDataFolder/AdditionalBrowserArguments). Do not change machine-wide settings or bypass policy; stop on uncertain isolation. The unique LocalAppData/RoamingAppData identity roots must not contain unrelated state.
+At native preflight, before acknowledgement, seeding, planner startup or faults:
 
-The generated configuration opens **native-start.html before mounting App or reading/migrating legacy WebView data**. It reports the actual native paths. Before starting the planner or injecting anything:
+1. Match actual native data paths to the manifest's unique root.
+2. Inspect this application's direct child WebView2 process command line. Canonicalize the actual `--user-data-dir`, compare full directory boundaries and check for reparse redirection. Substring matching is insufficient.
+3. Preserve PID/config/source/path evidence outside Git. Missing or uncertain isolation is BLOCKED.
+4. Only then acknowledge isolation and optionally seed the synthetic v2 fixture. Never overwrite pre-existing planner data. Restart with the same proven config without reseeding.
 
-1. Match those paths to the manifest's unique data root.
-2. Inspect this app's child WebView2 process command lines, for example via local `Get-CimInstance Win32_Process`. Verify actual `--user-data-dir` lies beneath one of the manifest's unique allowed profile roots. Canonicalize paths and compare full directory boundaries; an identifier substring alone is insufficient.
-3. Keep process IDs, actual roots and source/config fingerprints outside Git. Missing evidence, redirection or production-root matches are BLOCKED, not a pass.
-4. Only after external verification, check the preflight acknowledgement. For first-run migration choose **Seed synthetic v2 legacy planner**, then **Start isolated planner**. Seeding refuses to overwrite existing v1/v2 or native data. Verify Data still shows the same root and the legacy source value survives migration unchanged. Restart with the same config; do not reseed.
+For a development watcher EBUSY on generated Cargo output, preserve the error and use a diagnosed process-local watcher setting supported by installed Vite. Do not change global configuration or infer this explains unrelated test failures.
 
-Once both roots are proven isolated, test synthetic save/restart, queued-save close, failed-save/retry, WebView reload then immediate save, second-writer exclusion, Restore/Undo across restart, corruption recovery and no-valid-candidate preservation from #40. Apply filesystem failures only to the proven synthetic root. Preserve diagnostic evidence; never recursively delete unknown roots.
+This alternate development identity supplies source-equivalent native evidence, not production NSIS acceptance. #60 requires separately authorized visible install/uninstall/reinstall in a proven isolated Windows user or VM, with an exact installer and external All-data backup. This runbook does not authorize production-profile operations. Artifact hashing alone is not lifecycle acceptance.
 
-This is **source-equivalent native development acceptance**, not execution of the production-identity retained NSIS binary. It does not prove Start-menu registration, signing or uninstall/reinstall survival. #60 requires separately authorized visible lifecycle testing, preferably an isolated Windows user/VM, with the exact approved installer and external backup. This runbook does not authorize production-profile install/uninstall.
+## Return only new evidence
 
-## Return evidence, not another implementation
+Report exact source/config identity, focused pointer reachability, any new defect, and specific remaining #60/environment limits. Preserve previous passing evidence. Do not rebuild production installers just to retest CSS; a source-equivalent isolated dev shell suffices for presentation, while #60 must use its approved retained installer.
 
-Do not repeat unaffected zoom/drag/import/export/layout matrices. Report source/config identity, fault/retry and native PASS/FAIL/BLOCKED outcomes, evidence location, exact remaining tool limits and owned-worktree preservation/cleanup. No source commit is needed unless a new defect is reproduced. Keep PR #82 draft until native/lifecycle/security gates are resolved; neither unit tests nor a generated configuration can substitute for actual native observations.
+No commit is needed unless a genuine new defect is reproduced. Keep evidence outside Git, stop owned processes, and reconcile only the owned worktree without force. Keep PR #82 draft until the final connector review, native presentation evidence, lifecycle reconciliation and security disposition are adequate.

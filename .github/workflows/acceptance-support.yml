@@ -22,11 +22,12 @@ jobs:
   acceptance-support:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      ACCEPTANCE_EVIDENCE: ${{ runner.temp }}/planner-acceptance-evidence
-      PLAYWRIGHT_MODULE: ${{ runner.temp }}/planner-browser-tools/node_modules/playwright/index.mjs
-      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/planner-browser-binaries
     steps:
+      - name: Establish runner-local evidence and browser paths
+        run: |
+          echo "ACCEPTANCE_EVIDENCE=$RUNNER_TEMP/planner-acceptance-evidence" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_MODULE=$RUNNER_TEMP/planner-browser-tools/node_modules/playwright/index.mjs" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/planner-browser-binaries" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -74,6 +75,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: storage-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.ACCEPTANCE_EVIDENCE }}
+          path: ${{ runner.temp }}/planner-acceptance-evidence
           retention-days: 14
           if-no-files-found: error
