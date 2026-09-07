@@ -5,10 +5,10 @@
 }
 
 @media (max-width: 800px) {
-  /* Both states show cards on narrow screens. Focus opens the desktop state;
-     keep identical geometry so a first pointer click does not move its target. */
-  .sidepanel.open,
-  .sidepanel.collapsed {
+  /* The legacy state selector loads later than component CSS. Use state-specific
+     specificity so focus cannot add five gaps between pointerdown and pointerup. */
+  .workspace-layout .sidepanel.open,
+  .workspace-layout .sidepanel.collapsed {
     gap: 10px;
     padding-right: 0;
   }
