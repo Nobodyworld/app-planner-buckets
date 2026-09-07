@@ -11,7 +11,7 @@ const gate = () => { let resolve!: () => void; const promise = new Promise<void>
 const setup = () => {
   const before = planner('Before');
   const state = { current: before, recovery: null as string | null, failCommit: false, prepareGate: null as ReturnType<typeof gate> | null, commitGate: null as ReturnType<typeof gate> | null, commits: 0 };
-  const invoke: TauriInvoke = async <T>(command: string, args: Record<string, unknown> = {}): Promise<T> => {
+  const invoke: TauriInvoke = async <T,>(command: string, args: Record<string, unknown> = {}): Promise<T> => {
     if (command === 'desktop_storage_save') { state.current = JSON.parse(args.serialized as string); return JSON.stringify({ sequence: args.sequence, saved: true, stale: false, noOp: false, savedAt: args.savedAt }) as T; }
     if (command === 'desktop_storage_list_backups') return '[]' as T;
     if (command === 'desktop_storage_prune_backups') return undefined as T;
