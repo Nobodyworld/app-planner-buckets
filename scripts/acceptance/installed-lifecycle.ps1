@@ -35,13 +35,25 @@ function Get-PlannerUninstallEntry {
   $entries = @(
     foreach ($root in $roots) {
       Get-ItemProperty -Path $root -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -eq 'Planner Buckets' }
+        Where-Object {
+          $_.PSObject.Properties.Name -contains 'DisplayName' -and
+          [string]$_.DisplayName -eq 'Planner Buckets'
+        }
     }
   )
   if ($entries.Count -ne 1) {
     throw "Expected exactly one Planner Buckets uninstall registration; found $($entries.Count)."
   }
   return $entries[0]
+}
+
+function Get-UninstallCommand {
+  param([Parameter(Mandatory = $true)]$Entry)
+  $property = $Entry.PSObject.Properties['UninstallString']
+  if (-not $property -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+    throw 'Planner Buckets uninstall registration does not contain UninstallString.'
+  }
+  return [string]$property.Value
 }
 
 function Resolve-CommandExecutable {
@@ -70,8 +82,9 @@ function Get-PlannerShortcutPaths {
 function Resolve-PlannerExecutable {
   param([Parameter(Mandatory = $true)]$Entry)
 
-  if ($Entry.DisplayIcon) {
-    $displayIcon = [string]$Entry.DisplayIcon
+  $displayIconProperty = $Entry.PSObject.Properties['DisplayIcon']
+  if ($displayIconProperty -and -not [string]::IsNullOrWhiteSpace([string]$displayIconProperty.Value)) {
+    $displayIcon = [string]$displayIconProperty.Value
     if ($displayIcon -match '^\s*"([^"]+\.exe)"') {
       if (Test-Path -LiteralPath $Matches[1]) { return $Matches[1] }
     }
@@ -79,7 +92,7 @@ function Resolve-PlannerExecutable {
     if (Test-Path -LiteralPath $iconCandidate) { return $iconCandidate }
   }
 
-  $uninstaller = Resolve-CommandExecutable ([string]$Entry.UninstallString)
+  $uninstaller = Resolve-CommandExecutable (Get-UninstallCommand $Entry)
   $installRoot = Split-Path -Parent $uninstaller
   $candidates = @(
     Get-ChildItem -LiteralPath $installRoot -File -Filter '*.exe' -ErrorAction SilentlyContinue |
@@ -180,7 +193,7 @@ $result = [ordered]@{
 Invoke-NsisSilent -Executable $installer
 $entry = Get-PlannerUninstallEntry
 $installedExe = Resolve-PlannerExecutable $entry
-$uninstaller = Resolve-CommandExecutable ([string]$entry.UninstallString)
+$uninstaller = Resolve-CommandExecutable (Get-UninstallCommand $entry)
 $shortcuts = Get-PlannerShortcutPaths
 if (-not (Test-Path -LiteralPath $installedExe)) { throw 'Installed application executable was not found.' }
 if (-not (Test-Path -LiteralPath $uninstaller)) { throw 'Registered uninstaller executable was not found.' }
@@ -251,7 +264,7 @@ if ((Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash -ne $primaryHash
 $result.observations.repair = [ordered]@{ passed = $true }
 
 # Actual registered uninstall. Silent mode avoids UI automation but executes the real production uninstaller.
-$uninstaller = Resolve-CommandExecutable ([string]$repairEntry.UninstallString)
+$uninstaller = Resolve-CommandExecutable (Get-UninstallCommand $repairEntry)
 Invoke-NsisSilent -Executable $uninstaller
 Wait-ForCondition -Description 'uninstall registration removal' -TimeoutSeconds 30 -Condition {
   try { [void](Get-PlannerUninstallEntry); return $false } catch { return $true }
