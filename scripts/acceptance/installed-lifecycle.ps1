@@ -16,7 +16,6 @@ function Wait-ForCondition {
     [Parameter(Mandatory = $true)][string]$Description,
     [int]$TimeoutSeconds = 30
   )
-
   $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
   do {
     if (& $Condition) { return }
@@ -84,7 +83,6 @@ function Get-PlannerShortcutPaths {
 
 function Resolve-PlannerExecutable {
   param([Parameter(Mandatory = $true)]$Entry)
-
   $displayIconProperty = $Entry.PSObject.Properties['DisplayIcon']
   if ($displayIconProperty -and -not [string]::IsNullOrWhiteSpace([string]$displayIconProperty.Value)) {
     $displayIcon = [string]$displayIconProperty.Value
@@ -94,7 +92,6 @@ function Resolve-PlannerExecutable {
     $iconCandidate = ($displayIcon -replace ',\d+$', '').Trim('"')
     if (Test-Path -LiteralPath $iconCandidate) { return $iconCandidate }
   }
-
   $uninstaller = Resolve-CommandExecutable (Get-UninstallCommand $Entry)
   $installRoot = Split-Path -Parent $uninstaller
   $candidates = @(
@@ -118,15 +115,11 @@ function Invoke-NsisSilent {
 function Stop-PlannerProcess {
   param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
   if ($Process.HasExited) { return 'exited-before-close' }
-
   $closed = $false
   try { $closed = $Process.CloseMainWindow() } catch { $closed = $false }
   if ($closed) {
-    try {
-      if ($Process.WaitForExit(10000)) { return 'close-main-window' }
-    } catch { }
+    try { if ($Process.WaitForExit(10000)) { return 'close-main-window' } } catch { }
   }
-
   Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
   try { $Process.WaitForExit(5000) | Out-Null } catch { }
   return 'forced-after-lifecycle-observation'
@@ -186,7 +179,6 @@ $result = [ordered]@{
   observations = [ordered]@{}
 }
 
-# First real current-user install and Windows registration discovery.
 Invoke-NsisSilent -Executable $installer
 $entry = Get-PlannerUninstallEntry
 $installedExe = Resolve-PlannerExecutable $entry
@@ -202,7 +194,6 @@ $result.observations.firstInstall = [ordered]@{
   startMenuShortcutCount = $shortcuts.Count
 }
 
-# Launch the installed production identity and wait for durable bootstrap.
 $app = Start-Process -FilePath $installedExe -PassThru
 Wait-ForCondition -Description 'the first durable planner file' -TimeoutSeconds 45 -Condition { Test-Path -LiteralPath $primary }
 Wait-ForCondition -Description 'the migration completion marker' -TimeoutSeconds 45 -Condition { Test-Path -LiteralPath $migrationMarker }
@@ -212,7 +203,6 @@ if ($firstPlanner.version -ne 2 -or @($firstPlanner.projects).Count -lt 1) {
 }
 $firstCloseMode = Stop-PlannerProcess $app
 
-# Seed synthetic durable state while stopped and preserve an external backup.
 $projectId = [string]$firstPlanner.projects[0].id
 $timestamp = [DateTimeOffset]::UtcNow.ToString('o')
 $taskId = "lifecycle-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
@@ -235,11 +225,8 @@ Write-Utf8Json -Value $firstPlanner -Path $primary
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 Copy-Item -LiteralPath $primary -Destination $backupSentinel -Force
 Copy-Item -LiteralPath $primary -Destination $externalBackup -Force
-$primaryHashBeforeUninstall = (Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash
-$backupHashBeforeUninstall = (Get-FileHash -LiteralPath $backupSentinel -Algorithm SHA256).Hash
-$markerHashBeforeUninstall = (Get-FileHash -LiteralPath $migrationMarker -Algorithm SHA256).Hash
+$seedPrimaryHash = (Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash
 
-# Relaunch the installed application and confirm the synthetic state persists.
 $app = Start-Process -FilePath $installedExe -PassThru
 Start-Sleep -Seconds 4
 if ($app.HasExited) { throw "Installed application exited unexpectedly with code $($app.ExitCode)." }
@@ -248,19 +235,33 @@ if (-not (@($loadedPlanner.tasks) | Where-Object { $_.id -eq $taskId })) {
   throw 'Installed application did not retain the synthetic durable task across restart.'
 }
 $secondCloseMode = Stop-PlannerProcess $app
+$primaryHashBeforeRepair = (Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash
+$result.observations.syntheticRestart = [ordered]@{
+  taskPresent = $true
+  seededHash = $seedPrimaryHash.ToLowerInvariant()
+  settledHashBeforeRepair = $primaryHashBeforeRepair.ToLowerInvariant()
+  applicationReserializedBytes = ($seedPrimaryHash -ne $primaryHashBeforeRepair)
+}
 
-# Same-installer repair/reinstall must leave durable state untouched.
+# Baseline immediately before repair so application serialization is not
+# incorrectly attributed to the installer.
 Invoke-NsisSilent -Executable $installer
 $repairEntry = Get-PlannerUninstallEntry
 $repairExe = Resolve-PlannerExecutable $repairEntry
 if (-not (Test-Path -LiteralPath $repairExe)) { throw 'Application executable disappeared during repair/reinstall.' }
-if ((Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash -ne $primaryHashBeforeUninstall) {
+$primaryHashAfterRepair = (Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash
+if ($primaryHashAfterRepair -ne $primaryHashBeforeRepair) {
   throw 'Repair/reinstall modified durable planner data unexpectedly.'
 }
-$result.observations.repair = [ordered]@{ passed = $true }
+$result.observations.repair = [ordered]@{
+  passed = $true
+  primaryHashUnchanged = $true
+}
 
-# Execute the registered production uninstaller silently. Tauri's interactive
-# Delete app data checkbox is therefore not selected in this automation path.
+# Baseline immediately before uninstall; uninstall alone owns the next comparison.
+$primaryHashBeforeUninstall = (Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash
+$backupHashBeforeUninstall = (Get-FileHash -LiteralPath $backupSentinel -Algorithm SHA256).Hash
+$markerHashBeforeUninstall = (Get-FileHash -LiteralPath $migrationMarker -Algorithm SHA256).Hash
 $uninstaller = Resolve-CommandExecutable (Get-UninstallCommand $repairEntry)
 Invoke-NsisSilent -Executable $uninstaller
 Wait-ForCondition -Description 'uninstall registration removal' -TimeoutSeconds 30 -Condition {
@@ -289,7 +290,6 @@ $result.observations.uninstall = [ordered]@{
   dataRemovalSelected = $false
 }
 
-# Reinstall the same exact bytes and confirm surviving data is loaded.
 Invoke-NsisSilent -Executable $installer
 $reinstallEntry = Get-PlannerUninstallEntry
 $reinstalledExe = Resolve-PlannerExecutable $reinstallEntry
@@ -308,7 +308,6 @@ $result.observations.reinstall = [ordered]@{
   syntheticPlannerLoaded = $true
 }
 
-# Prove installed recovery after reinstall using the surviving valid backup.
 $corruptBytes = [System.Text.UTF8Encoding]::new($false).GetBytes('{"version":2,"corrupt":')
 [System.IO.File]::WriteAllBytes($primary, $corruptBytes)
 $corruptHash = (Get-FileHash -LiteralPath $primary -Algorithm SHA256).Hash
