@@ -11,6 +11,8 @@ test('isolates identity and preserves security/window settings without changing 
   assert.equal(result.app.windows[0].label, 'main');
   assert.equal(result.app.windows[0].dragDropEnabled, false);
   assert.equal(result.app.windows[0].dataDirectory, 'webview');
+  assert.equal(result.app.windows[0].url, `acceptance/native-start.html?profile=${result.identifier}`);
+  assert.ok(result.build.beforeDevCommand.includes('--mode acceptance'));
   assert.deepEqual(result.app.security.capabilities, ['default']);
   assert.ok(result.app.security.csp.includes('ws://localhost:5178'));
   assert.ok(result.build.beforeDevCommand.includes('--strictPort'));

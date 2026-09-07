@@ -31,10 +31,10 @@ export function makeProfile(base, token, port = 5178) {
     productName: `Planner Buckets Acceptance ${token.slice(0, 8)}`,
     build: {
       devUrl: `http://localhost:${port}`,
-      beforeDevCommand: `npm run dev -- --host localhost --port ${port} --strictPort`,
+      beforeDevCommand: `npm run dev -- --mode acceptance --host localhost --port ${port} --strictPort`,
     },
     app: {
-      windows: [{ ...base.app.windows[0], title: `SYNTHETIC ACCEPTANCE ${token.slice(0, 8)}`, dataDirectory: 'webview' }],
+      windows: [{ ...base.app.windows[0], title: `SYNTHETIC ACCEPTANCE ${token.slice(0, 8)}`, dataDirectory: 'webview', url: `acceptance/native-start.html?profile=${identifier}` }],
       security: { ...base.app.security, csp: csp.replaceAll('localhost:5173', `localhost:${port}`) },
     },
     // This configuration is for a dev process, not an alternative installer.
@@ -97,7 +97,7 @@ function main() {
   console.log(JSON.stringify(result, null, 2));
   console.log('\nNo app launched. Recheck environment overrides and the generated config before running:');
   console.log(`npm run desktop:dev -- --config "${result.configPath}"`);
-  console.log('Before synthetic native changes, verify the Data panel root and WebView2 --user-data-dir against manifest.json.');
+  console.log('Before synthetic native changes, verify the preflight data root and WebView2 --user-data-dir against manifest.json.');
   console.log('A registry/policy WebView2 override can defeat config isolation. Stop if the actual path is not inside this unique profile.');
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
