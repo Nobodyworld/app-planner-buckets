@@ -21,6 +21,9 @@ if (!cargoVersion || pkg.version !== tauri.version || pkg.version !== cargoVersi
 if (releaseTauri.bundle?.createUpdaterArtifacts !== true) {
   fail('Release-only Tauri configuration must use createUpdaterArtifacts=true.');
 }
+if (tauri.plugins?.updater?.pubkey !== 'RUNTIME_CONFIGURED_BY_RUST') {
+  fail('Base Tauri config must keep the updater bootstrap placeholder; the trusted key is injected by the constrained Rust updater builder.');
+}
 
 expectIncludes(release, 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', 'Release workflow');
 expectIncludes(release, 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020', 'Release workflow');
