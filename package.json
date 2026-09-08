@@ -14,9 +14,10 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
+    "release:check": "node scripts/release/check-release-config.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify": "npm run test && npm run build"
+    "verify": "npm run release:check && npm run test && npm run build"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
