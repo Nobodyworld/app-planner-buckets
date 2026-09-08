@@ -1,0 +1,132 @@
+name: Signed updater validation
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  signed-updater:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/signed-desktop-updater'
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      PLANNER_BUCKETS_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - name: Checkout exact pull-request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Detect signing configuration
+        id: signing
+        shell: pwsh
+        run: |
+          $configured = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -and -not [string]::IsNullOrWhiteSpace($env:PLANNER_BUCKETS_UPDATER_PUBKEY)
+          "configured=$($configured.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          if ($configured) {
+            'Signed updater validation is enabled for this exact PR head.' | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          } else {
+            'Signed updater validation is not yet configured. Add TAURI_SIGNING_PRIVATE_KEY and TAURI_UPDATER_PUBLIC_KEY, then rerun this job before merge.' | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Setup Node.js
+        if: steps.signing.outputs.configured == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Setup Rust toolchain
+        if: steps.signing.outputs.configured == 'true'
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal
+          rustup default stable-x86_64-pc-windows-msvc
+          rustup component add rustfmt clippy
+
+      - name: Install dependencies
+        if: steps.signing.outputs.configured == 'true'
+        run: npm ci
+
+      - name: Verify source and release contract
+        if: steps.signing.outputs.configured == 'true'
+        shell: pwsh
+        run: |
+          npm run verify
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+
+      - name: Build signed updater candidate without publishing
+        if: steps.signing.outputs.configured == 'true'
+        run: npm run desktop:build -- --config src-tauri/tauri.release.conf.json
+
+      - name: Verify signed updater candidate
+        if: steps.signing.outputs.configured == 'true'
+        id: evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*-setup.exe')
+          if ($installer.Count -ne 1) { throw "Expected one NSIS installer; found $($installer.Count)." }
+          $signature = "$($installer[0].FullName).sig"
+          if (-not (Test-Path -LiteralPath $signature)) { throw 'Signed updater signature is missing.' }
+          if ((Get-Item -LiteralPath $signature).Length -lt 16) { throw 'Signed updater signature is unexpectedly short.' }
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $evidenceRoot = Join-Path $env:RUNNER_TEMP 'signed-updater-evidence'
+          New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
+          Copy-Item -LiteralPath $installer[0].FullName -Destination $evidenceRoot
+          Copy-Item -LiteralPath $signature -Destination $evidenceRoot
+          $installerHash = (Get-FileHash -LiteralPath $installer[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $signatureHash = (Get-FileHash -LiteralPath $signature -Algorithm SHA256).Hash.ToLowerInvariant()
+          [ordered]@{
+            schemaVersion = 1
+            applicationVersion = [string]$package.version
+            sourceSha = $env:GITHUB_SHA
+            pullRequestHead = '${{ github.event.pull_request.head.sha }}'
+            workflowRunId = $env:GITHUB_RUN_ID
+            workflowRunAttempt = $env:GITHUB_RUN_ATTEMPT
+            installerFile = $installer[0].Name
+            installerSizeBytes = $installer[0].Length
+            installerSha256 = $installerHash
+            signatureFile = (Split-Path $signature -Leaf)
+            signatureSha256 = $signatureHash
+            releaseConfig = 'src-tauri/tauri.release.conf.json'
+            published = $false
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidenceRoot 'signed-updater-validation.json') -Encoding utf8NoBOM
+          "evidence-root=$evidenceRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          @"
+          ### Signed updater candidate PASS
+
+          | Field | Value |
+          | --- | --- |
+          | Source | ``${{ github.event.pull_request.head.sha }}`` |
+          | Installer | ``$($installer[0].Name)`` |
+          | Installer SHA-256 | ``$installerHash`` |
+          | Signature SHA-256 | ``$signatureHash`` |
+          | Published | **No** |
+          "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
+      - name: Confirm tracked source stayed unchanged
+        if: steps.signing.outputs.configured == 'true'
+        shell: pwsh
+        run: |
+          $changes = @(git status --short --untracked-files=no)
+          if ($changes.Count -ne 0) {
+            $changes | ForEach-Object { Write-Host $_ }
+            throw 'Signed updater validation changed tracked repository inputs.'
+          }
+
+      - name: Upload signed updater validation evidence
+        if: steps.signing.outputs.configured == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-updater-${{ github.event.pull_request.head.sha }}-run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ steps.evidence.outputs.evidence-root }}
+          if-no-files-found: error
+          retention-days: 30
