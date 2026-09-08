@@ -1,0 +1,49 @@
+name: Updater Cargo lock minimizer
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  minimize-lock:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/signed-desktop-updater'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout updater branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 1
+
+      - name: Restore accepted main Cargo lock baseline
+        run: |
+          git fetch --depth=1 origin main
+          git show origin/main:src-tauri/Cargo.lock > src-tauri/Cargo.lock
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Let Cargo add only the updater-required resolution
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Validate scope
+        run: |
+          git diff --check -- src-tauri/Cargo.lock
+          git diff --stat -- src-tauri/Cargo.lock
+          test -z "$(git diff --name-only -- . ':!src-tauri/Cargo.lock')"
+          grep -q 'name = "tauri-plugin-updater"' src-tauri/Cargo.lock
+          grep -q 'version = "2.11.0"' src-tauri/Cargo.lock
+
+      - name: Commit minimized generated lockfile
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src-tauri/Cargo.lock
+          git commit -m 'chore(updater): minimize generated Cargo lockfile'
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
