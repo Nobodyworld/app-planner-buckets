@@ -37,6 +37,7 @@ export interface PlannerStorageAdapter {
   readonly mode: PlannerStorageMode;
   getStatus(): PlannerStorageStatus;
   subscribe(listener: (status: PlannerStorageStatus) => void): () => void;
+  getNativeSession(): number | null;
   save(data: PlannerDataV2): Promise<PlannerStorageSaveResult>;
   flush(): Promise<void>;
   retry(): Promise<void>;
@@ -105,6 +106,7 @@ export class BrowserPlannerStorageAdapter extends ObservableStorage implements P
   constructor(private storage: RecoveryStorageAdapter = localStorage) {
     super({ mode: 'browser-local-storage', writable: true, phase: 'idle', dataPath: null, backupPath: null, lastSavedAt: null, warning: null, error: null });
   }
+  getNativeSession = (): null => null;
   save = async (data: PlannerDataV2): Promise<PlannerStorageSaveResult> => {
     this.unsaved = data; this.update({ phase: 'saving', error: null });
     try {
@@ -133,6 +135,7 @@ export class DesktopPlannerStorageAdapter extends ObservableStorage implements P
     super({ mode: 'desktop-file', ...status, phase: status.writable ? 'idle' : 'read-only', lastSavedAt: null, error: null });
     this.session = status.session;
   }
+  getNativeSession = (): number => this.session;
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.tail.then(operation);
     this.tail = result.then(() => undefined, () => undefined);
