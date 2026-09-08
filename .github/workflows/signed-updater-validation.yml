@@ -23,11 +23,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Detect signing configuration
-        id: signing
         shell: pwsh
         run: |
           $configured = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -and -not [string]::IsNullOrWhiteSpace($env:PLANNER_BUCKETS_UPDATER_PUBKEY)
-          "configured=$($configured.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           if (-not $configured) {
             throw 'Signed updater validation is blocked until TAURI_SIGNING_PRIVATE_KEY and TAURI_UPDATER_PUBLIC_KEY are configured.'
           }
@@ -58,8 +56,22 @@ jobs:
           cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
           cargo test --locked --manifest-path src-tauri/Cargo.toml
 
+      - name: Materialize signed Tauri configuration
+        id: signed-config
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $config = Get-Content 'src-tauri/tauri.release.conf.json' -Raw | ConvertFrom-Json -AsHashtable
+          $config['plugins'] = @{ updater = @{ pubkey = $env:PLANNER_BUCKETS_UPDATER_PUBKEY } }
+          $configPath = Join-Path $env:RUNNER_TEMP 'planner-buckets-signed-tauri.json'
+          $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configPath -Encoding utf8NoBOM
+          "path=$configPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Build signed updater candidate without publishing
-        run: npm run desktop:build -- --config src-tauri/tauri.release.conf.json
+        shell: pwsh
+        env:
+          SIGNED_TAURI_CONFIG: ${{ steps.signed-config.outputs.path }}
+        run: npm run desktop:build -- --config "$env:SIGNED_TAURI_CONFIG"
 
       - name: Verify signed updater candidate
         id: evidence
@@ -90,7 +102,7 @@ jobs:
             installerSha256 = $installerHash
             signatureFile = (Split-Path $signature -Leaf)
             signatureSha256 = $signatureHash
-            releaseConfig = 'src-tauri/tauri.release.conf.json'
+            releaseConfig = 'runner-local merge of src-tauri/tauri.release.conf.json and TAURI_UPDATER_PUBLIC_KEY'
             published = $false
           } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidenceRoot 'signed-updater-validation.json') -Encoding utf8NoBOM
           "evidence-root=$evidenceRoot" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
