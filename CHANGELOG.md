@@ -14,12 +14,9 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Changed
 
-- Aligned the supported Node.js range, setup documentation, CI, and release workflow with the current Vite runtime minimums.
-- Added CI cancellation for superseded runs and timeouts for CI and release jobs.
 - Clarified that the original planning documents are historical design records and that current source, tests, and README documentation are authoritative.
 - Routed security reports to the private reporting guidance instead of allowing unstructured public security issues.
 - Clarified localStorage privacy notes in the README and security policy.
-- Documented the canonical installer-candidate, rebuild, retention, and release-promotion boundaries.
 
 ### Fixed
 
@@ -29,6 +26,31 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Aligned contributor guidance with the current v2 reducer path and JSON export filename.
 - Aligned package metadata description with the public README positioning.
 - Added the current `bsp-planner-*.json` export filename pattern to `.gitignore` while preserving the older export pattern.
+
+## [1.2.0] - 2026-09-07
+
+### Added
+
+- Added durable Tauri application-data persistence with validated safe replacement, one-time WebView migration, automatic routine and operation backups, corruption recovery, writer exclusion, close-time save protection, and durable Restore/Undo recovery.
+- Added storage-health diagnostics and exact resolved planner/backup locations in the Data surface while preserving the browser application's localStorage workflow.
+- Added a signed Tauri desktop updater with explicit user-controlled check/install actions and a mandatory verified `pre-update` durable snapshot before installation.
+- Added a tag-gated GitHub Release pipeline for signed Windows updater assets, `latest.json`, the browser distribution, and exact release provenance.
+- Added repeatable hosted Windows installer lifecycle acceptance for install, repair, uninstall/data survival, reinstall, and corruption recovery.
+
+### Changed
+
+- Advanced Planner Buckets desktop/browser release metadata from 1.1.0 to 1.2.0.
+- Moved maintained CI and release validation to Node 22 while retaining the documented package-compatible Node range.
+- Updated `softprops/action-gh-release` to the full-SHA-pinned 3.0.3 release inside the redesigned release workflow.
+- Updated the npm lockfile to a patched Browserslist 4.28.9 graph and retained zero reported npm vulnerabilities in accepted validation.
+- Documented the canonical installer candidate, signed-update trust boundary, release promotion, rollback, and updater-key handling procedures.
+
+### Fixed
+
+- Prevented recovery replacement from deleting its last valid fallback before promotion is verified.
+- Made desktop Saved/error/Retry state reflect acknowledged durable writes rather than optimistic in-memory completion.
+- Hardened Restore cancellation/commit ordering, WebView reload session renewal, queued-close behavior, and stale-write rejection.
+- Fixed Data-panel clipping, focus-induced pointer target movement, and long native error paths that could hide Retry controls.
 
 ## [1.1.0] - 2026-07-06
 
@@ -81,4 +103,3 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Task and bucket management (create, edit, move, archive, restore).
 - JSON export/import and local storage persistence.
 - Theme and visual mode controls.
-- Reducer test coverage.
