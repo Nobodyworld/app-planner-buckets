@@ -93,7 +93,8 @@ jobs:
           [ordered]@{
             schemaVersion = 1
             applicationVersion = [string]$package.version
-            sourceSha = $env:GITHUB_SHA
+            sourceSha = '${{ github.event.pull_request.head.sha }}'
+            workflowMergeSha = $env:GITHUB_SHA
             pullRequestHead = '${{ github.event.pull_request.head.sha }}'
             workflowRunId = $env:GITHUB_RUN_ID
             workflowRunAttempt = $env:GITHUB_RUN_ATTEMPT
