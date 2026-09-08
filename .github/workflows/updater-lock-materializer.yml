@@ -1,0 +1,42 @@
+name: Updater lock materializer
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  materialize-lock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact pull-request head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Generate Cargo lockfile
+        run: cargo generate-lockfile --manifest-path src-tauri/Cargo.toml
+
+      - name: Show bounded lockfile change
+        run: git diff --check -- src-tauri/Cargo.lock && git diff --stat -- src-tauri/Cargo.lock
+
+      - name: Stage generated lockfile
+        run: |
+          mkdir -p "$RUNNER_TEMP/updater-lock"
+          cp src-tauri/Cargo.lock "$RUNNER_TEMP/updater-lock/Cargo.lock"
+
+      - name: Upload generated lockfile
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: updater-cargo-lock-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/updater-lock/Cargo.lock
+          if-no-files-found: error
+          retention-days: 3
