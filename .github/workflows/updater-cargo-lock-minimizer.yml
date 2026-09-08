@@ -29,8 +29,8 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - name: Let Cargo add only the updater-required resolution
-        run: cargo check --manifest-path src-tauri/Cargo.toml
+      - name: Let Cargo resolve only updater-required packages
+        run: cargo metadata --manifest-path src-tauri/Cargo.toml --format-version 1 > "$RUNNER_TEMP/cargo-metadata.json"
 
       - name: Validate scope
         run: |
