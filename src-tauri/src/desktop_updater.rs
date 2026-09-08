@@ -105,7 +105,9 @@ pub async fn desktop_update_install(
         .map_err(|_| "Updater state lock failed.".to_string())?
         .as_ref()
         .cloned()
-        .ok_or_else(|| "No checked update is pending. Check again before installing.".to_string())?;
+        .ok_or_else(|| {
+            "No checked update is pending. Check again before installing.".to_string()
+        })?;
 
     // This native command is the only install path exposed by Planner Buckets. The
     // durable pre-update snapshot is therefore mandatory and immediately precedes
