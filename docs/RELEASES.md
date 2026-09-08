@@ -20,11 +20,13 @@ The updater plugin verifies the artifact signature before installation. Direct W
 
 ## One-time signing configuration
 
-Generate the updater key pair outside Git. From a trusted local checkout with the pinned Tauri CLI installed:
+Generate the updater key pair outside Git. From a trusted local checkout after `npm ci`, invoke the repo-pinned Tauri CLI rather than relying on a global installation or a nonexistent npm script:
 
 ```powershell
-$KeyPath = Join-Path $HOME '.tauri\planner-buckets.key'
-npm run tauri signer generate -- -w $KeyPath
+$KeyDir = Join-Path $HOME '.tauri'
+$KeyPath = Join-Path $KeyDir 'planner-buckets.key'
+New-Item -ItemType Directory -Path $KeyDir -Force | Out-Null
+npm exec -- tauri signer generate -w $KeyPath
 ```
 
 Protect the private key and its password as long-lived release credentials. Losing the private key prevents future releases from updating clients that trust its public key.
@@ -43,12 +45,13 @@ Do not store the private key in a repository variable or tracked file.
 
 PR #89 adds `Signed updater validation`, a same-repository pull-request workflow that never publishes a GitHub Release.
 
-Before the signing values exist, the workflow reports that signing is not configured and stops without attempting a fake signed build. After the values are configured, rerun the exact PR-head job. It then:
+Before the signing values exist, the workflow fails at its signing-configuration gate rather than reporting a misleading successful skipped build. After the values are configured, the exact PR-head job:
 
 - runs the normal source, TypeScript/Vite and locked Rust validation;
-- builds using `src-tauri/tauri.release.conf.json` with the real updater signing key;
+- materializes a runner-local Tauri release config by combining the tracked release settings with the repository public-key variable;
+- builds with the private signing key while keeping both the private key and real public key out of tracked source;
 - requires exactly one NSIS installer and its `.exe.sig` updater signature;
-- records exact source/run, installer size/hash and signature hash;
+- records the exact PR source SHA separately from GitHub's synthetic workflow merge SHA, plus installer size/hash and signature hash;
 - confirms tracked source inputs remained unchanged; and
 - retains the signed candidate as a 30-day Actions artifact without publishing it.
 
@@ -61,7 +64,7 @@ This is the required pre-merge proof that the repository's configured signing ma
 3. Confirm CI, storage lifecycle, security, and signed-updater validation are green.
 4. Create the exact `vMAJOR.MINOR.PATCH` tag only after explicit release approval.
 5. The `Release` workflow validates the tag/version identity before any GitHub Release is created.
-6. The Windows release job requires the signing secret and public-key variable, builds updater artifacts with `createUpdaterArtifacts: true`, and lets pinned Tauri Action create a **draft** release plus `latest.json`.
+6. The Windows release job requires the signing secret and public-key variable, materializes the runner-local signed Tauri config, builds updater artifacts with `createUpdaterArtifacts: true`, and lets pinned Tauri Action create a **draft** release plus `latest.json`.
 7. The workflow verifies the signed NSIS artifact and `latest.json`, adds the browser ZIP and `release-provenance.json`, verifies the complete draft asset set, and only then publishes the release.
 8. Record the final source SHA, run ID, installer/update hashes, `latest.json` hash, and release URL as the promoted candidate identity.
 
