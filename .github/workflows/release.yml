@@ -101,6 +101,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Materialize signed Tauri configuration
+        id: signed-config
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $config = Get-Content 'src-tauri/tauri.release.conf.json' -Raw | ConvertFrom-Json -AsHashtable
+          $config['plugins'] = @{ updater = @{ pubkey = $env:PLANNER_BUCKETS_UPDATER_PUBKEY } }
+          $configPath = Join-Path $env:RUNNER_TEMP 'planner-buckets-signed-tauri.json'
+          $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configPath -Encoding utf8NoBOM
+          "path=$configPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Build signed Tauri release as draft
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         with:
@@ -111,7 +122,7 @@ jobs:
           generateReleaseNotes: true
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
-          args: --config src-tauri/tauri.release.conf.json
+          args: --config "${{ steps.signed-config.outputs.path }}"
 
       - name: Verify signed updater assets and prepare supplemental release evidence
         id: release-evidence
