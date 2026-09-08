@@ -47,5 +47,10 @@
         "installMode": "currentUser"
       }
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "RUNTIME_CONFIGURED_BY_RUST"
+    }
   }
 }
