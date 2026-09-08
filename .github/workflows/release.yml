@@ -4,41 +4,201 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  build-and-release:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
-
+    timeout-minutes: 20
     steps:
-      - name: Checkout
+      - name: Checkout exact tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20.19.0
+          node-version: '22'
           cache: npm
+
+      - name: Verify release version identity
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const tag = process.env.GITHUB_REF_NAME;
+          const expected = `v${JSON.parse(fs.readFileSync('package.json', 'utf8')).version}`;
+          const tauri = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')).version;
+          const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          if (tag !== expected || tauri !== expected.slice(1) || cargo !== expected.slice(1)) {
+            throw new Error(`Release identity mismatch: tag=${tag}, package=${expected}, tauri=${tauri}, cargo=${cargo}`);
+          }
+          NODE
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Verify
+      - name: Verify browser application
         run: npm run verify
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+  publish-windows:
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      PLANNER_BUCKETS_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout exact tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: dist
-          path: dist
+          persist-credentials: false
+          ref: ${{ github.sha }}
 
-      - name: Publish GitHub release
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          generate_release_notes: true
+          node-version: '22'
+          cache: npm
+
+      - name: Setup Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal
+          rustup default stable-x86_64-pc-windows-msvc
+          rustup component add rustfmt clippy
+
+      - name: Verify signing configuration and release identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY is not configured.'
+          }
+          if ([string]::IsNullOrWhiteSpace($env:PLANNER_BUCKETS_UPDATER_PUBKEY)) {
+            throw 'TAURI_UPDATER_PUBLIC_KEY repository variable is not configured.'
+          }
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $tauri = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $cargo = Get-Content src-tauri/Cargo.toml -Raw
+          $cargoVersion = [regex]::Match($cargo, '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+          $expectedTag = "v$($package.version)"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag -or [string]$tauri.version -ne [string]$package.version -or $cargoVersion -ne [string]$package.version) {
+            throw "Release identity mismatch: tag=$env:GITHUB_REF_NAME package=$($package.version) tauri=$($tauri.version) cargo=$cargoVersion"
+          }
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build signed Tauri release as draft
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Planner Buckets ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: --config src-tauri/tauri.release.conf.json
+
+      - name: Verify signed updater assets and prepare supplemental release evidence
+        id: release-evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $version = [string]$package.version
+          $installer = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*-setup.exe')
+          if ($installer.Count -ne 1) { throw "Expected one NSIS installer; found $($installer.Count)." }
+          $signaturePath = "$($installer[0].FullName).sig"
+          if (-not (Test-Path -LiteralPath $signaturePath)) { throw 'Signed updater artifact is missing the NSIS signature.' }
+
+          $releaseCheck = Join-Path $env:RUNNER_TEMP 'release-check'
+          New-Item -ItemType Directory -Path $releaseCheck -Force | Out-Null
+          gh release download $env:GITHUB_REF_NAME --pattern latest.json --dir $releaseCheck --clobber
+          $latestPath = Join-Path $releaseCheck 'latest.json'
+          $latest = Get-Content $latestPath -Raw | ConvertFrom-Json
+          if ([string]$latest.version -ne $version) { throw "latest.json version '$($latest.version)' does not match '$version'." }
+          $windows = @($latest.platforms.PSObject.Properties | Where-Object { $_.Name -like 'windows-x86_64*' })
+          if ($windows.Count -lt 1) { throw 'latest.json has no Windows x86_64 updater entry.' }
+          $localSignature = (Get-Content -LiteralPath $signaturePath -Raw).Trim()
+          if (-not ($windows | Where-Object { [string]$_.Value.signature -eq $localSignature })) {
+            throw 'latest.json signature does not match the locally signed NSIS updater artifact.'
+          }
+          if ($windows | Where-Object { [string]$_.Value.url -notmatch '^https://github\.com/Nobodyworld/app-planner-buckets/releases/download/' }) {
+            throw 'latest.json contains an unexpected Windows updater URL.'
+          }
+
+          $supplement = Join-Path $env:RUNNER_TEMP 'release-supplement'
+          New-Item -ItemType Directory -Path $supplement -Force | Out-Null
+          $webZip = Join-Path $supplement "planner-buckets-web-$version.zip"
+          Compress-Archive -Path 'dist/*' -DestinationPath $webZip -CompressionLevel Optimal
+
+          $installerHash = (Get-FileHash $installer[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $signatureHash = (Get-FileHash $signaturePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $latestHash = (Get-FileHash $latestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $webHash = (Get-FileHash $webZip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $provenancePath = Join-Path $supplement 'release-provenance.json'
+          [ordered]@{
+            schemaVersion = 1
+            application = 'Planner Buckets'
+            applicationVersion = $version
+            tag = $env:GITHUB_REF_NAME
+            sourceSha = $env:GITHUB_SHA
+            workflowRunId = $env:GITHUB_RUN_ID
+            workflowRunAttempt = $env:GITHUB_RUN_ATTEMPT
+            installerFile = $installer[0].Name
+            installerSizeBytes = $installer[0].Length
+            installerSha256 = $installerHash
+            updaterSignatureFile = (Split-Path $signaturePath -Leaf)
+            updaterSignatureSha256 = $signatureHash
+            latestJsonSha256 = $latestHash
+            webArchiveFile = (Split-Path $webZip -Leaf)
+            webArchiveSha256 = $webHash
+            updaterMetadataEndpoint = 'https://github.com/Nobodyworld/app-planner-buckets/releases/latest/download/latest.json'
+            generatedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+          } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $provenancePath -Encoding utf8NoBOM
+
+          "supplement-path=$supplement" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          @"
+          ### Signed release candidate
+
+          | Field | Value |
+          | --- | --- |
+          | Tag | ``$env:GITHUB_REF_NAME`` |
+          | Source | ``$env:GITHUB_SHA`` |
+          | Installer | ``$($installer[0].Name)`` |
+          | Installer SHA-256 | ``$installerHash`` |
+          | latest.json SHA-256 | ``$latestHash`` |
+          | Web ZIP SHA-256 | ``$webHash`` |
+          "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload web distribution and release provenance
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ github.ref_name }}
+          draft: true
+          files: |
+            ${{ steps.release-evidence.outputs.supplement-path }}/*
+          fail_on_unmatched_files: true
+
+      - name: Verify draft release assets then publish
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = gh release view $env:GITHUB_REF_NAME --json isDraft,tagName,assets | ConvertFrom-Json
+          if (-not $release.isDraft) { throw 'Release was published before final asset verification.' }
+          $names = @($release.assets | ForEach-Object { [string]$_.name })
+          foreach ($pattern in @('*-setup.exe', '*-setup.exe.sig', 'latest.json', 'planner-buckets-web-*.zip', 'release-provenance.json')) {
+            if (-not ($names | Where-Object { $_ -like $pattern })) { throw "Release is missing required asset '$pattern'." }
+          }
+          gh release edit $env:GITHUB_REF_NAME --draft=false
