@@ -1,15 +1,19 @@
 mod desktop_storage;
+mod desktop_updater;
 
 use desktop_storage::*;
+use desktop_updater::*;
 use tauri::{Emitter, Manager, WindowEvent};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let root = app.path().app_local_data_dir()?;
             app.manage(DesktopStorageState::new(root).map_err(std::io::Error::other)?);
+            app.manage(DesktopUpdaterState::new());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -35,6 +39,8 @@ pub fn run() {
             desktop_storage_prune_backups,
             desktop_storage_enable_close_guard,
             desktop_storage_finish_close,
+            desktop_update_check,
+            desktop_update_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Planner Buckets");
