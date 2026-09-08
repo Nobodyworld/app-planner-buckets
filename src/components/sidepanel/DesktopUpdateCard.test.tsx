@@ -3,9 +3,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DesktopUpdateCard } from './DesktopUpdateCard';
 
 afterEach(() => {
-  document.getElementById('root')?.removeAttribute('inert');
-  document.getElementById('root')?.removeAttribute('aria-busy');
+  document.getElementById('root')?.remove();
 });
+
+const renderInApplicationRoot = (component: React.ReactNode): HTMLElement => {
+  const root = document.createElement('div');
+  root.id = 'root';
+  document.body.append(root);
+  render(component, { container: root });
+  return root;
+};
 
 describe('DesktopUpdateCard', () => {
   it('is absent from browser mode', () => {
@@ -33,7 +40,7 @@ describe('DesktopUpdateCard', () => {
     expect(screen.queryByRole('button', { name: 'Install and restart' })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
 
-    expect(await screen.findByText(/Version 1.2.0 is available/)).toBeInTheDocument();
+    expect(await screen.findByRole('status')).toHaveTextContent('Version 1.2.0 is available. Signed update available.');
     expect(installUpdate).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Install and restart' }));
     await waitFor(() => expect(installUpdate).toHaveBeenCalledOnce());
@@ -47,7 +54,7 @@ describe('DesktopUpdateCard', () => {
       version: '1.2.0',
     }));
     const installUpdate = vi.fn(async () => { throw new Error('Pre-update snapshot failed.'); });
-    render(
+    const root = renderInApplicationRoot(
       <DesktopUpdateCard
         runtimeAvailable
         checkForUpdate={checkForUpdate}
@@ -60,7 +67,8 @@ describe('DesktopUpdateCard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Install and restart' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Pre-update snapshot failed.');
-    expect(document.getElementById('root')).not.toHaveAttribute('inert');
+    expect(root).not.toHaveAttribute('inert');
+    expect(root).not.toHaveAttribute('aria-busy');
   });
 
   it('explains when a development build has no updater key', async () => {
