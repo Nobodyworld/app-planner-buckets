@@ -29,8 +29,8 @@ expectIncludes(release, 'softprops/action-gh-release@efb35369e0ad2afab669f228072
 expectIncludes(release, 'TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}', 'Release workflow');
 expectIncludes(release, 'PLANNER_BUCKETS_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}', 'Release workflow');
 expectIncludes(release, 'releaseDraft: true', 'Release workflow');
+expectIncludes(release, 'args: --config src-tauri/tauri.release.conf.json', 'Release workflow');
 expectIncludes(release, 'gh release edit $env:GITHUB_REF_NAME --draft=false', 'Release workflow');
-expectIncludes(release, 'createUpdaterArtifacts', 'Release workflow documentation/config path');
 if (release.includes('workflow_dispatch:')) fail('Release publication must not be manually dispatched outside an exact version tag.');
 
 if (capability.includes('updater:')) {
