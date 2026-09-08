@@ -17,26 +17,38 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha }}
 
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+
       - name: Setup Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Generate npm lockfile metadata
+        run: npm install --package-lock-only --ignore-scripts
+
       - name: Generate Cargo lockfile
         run: cargo generate-lockfile --manifest-path src-tauri/Cargo.toml
 
-      - name: Show bounded lockfile change
-        run: git diff --check -- src-tauri/Cargo.lock && git diff --stat -- src-tauri/Cargo.lock
+      - name: Show bounded lockfile changes
+        run: |
+          git diff --check -- package-lock.json src-tauri/Cargo.lock
+          git diff --stat -- package-lock.json src-tauri/Cargo.lock
 
-      - name: Stage generated lockfile
+      - name: Stage generated lockfiles
         run: |
           mkdir -p "$RUNNER_TEMP/updater-lock"
+          cp package-lock.json "$RUNNER_TEMP/updater-lock/package-lock.json"
           cp src-tauri/Cargo.lock "$RUNNER_TEMP/updater-lock/Cargo.lock"
 
-      - name: Upload generated lockfile
+      - name: Upload generated lockfiles
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: updater-cargo-lock-${{ github.event.pull_request.head.sha }}
-          path: ${{ runner.temp }}/updater-lock/Cargo.lock
+          name: updater-lockfiles-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/updater-lock
           if-no-files-found: error
           retention-days: 3
