@@ -1,0 +1,31 @@
+.desktop-update-card {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.3));
+  border-radius: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.desktop-update-head,
+.desktop-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.desktop-update-head {
+  justify-content: space-between;
+}
+
+.desktop-update-message,
+.desktop-update-helper {
+  margin: 0;
+}
+
+.desktop-update-helper {
+  font-size: 0.875rem;
+  opacity: 0.78;
+}

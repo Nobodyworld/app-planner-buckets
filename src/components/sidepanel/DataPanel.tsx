@@ -1,3 +1,4 @@
+import { DesktopUpdateCard } from './DesktopUpdateCard';
 import { StorageStatusCard } from './StorageStatusCard';
 import type { ChangeEvent, RefObject } from 'react';
 import type { BucketV2 as Bucket } from '../../types/v2';
@@ -118,6 +119,7 @@ export function DataPanel({
                 actions are in Advanced options.
             </p>
             <StorageStatusCard />
+            <DesktopUpdateCard />
             <div className="data-action-row">
                 <button type="button" className="secondary-button" onClick={onExportData}>
                     Export JSON

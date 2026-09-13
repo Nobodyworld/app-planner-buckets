@@ -8,6 +8,7 @@ import { installDesktopCloseGuard } from './storage/plannerStorageLifecycle';
 import './styles.css';
 import './responsiveLayout.css';
 import './storageStatus.css';
+import './desktopUpdate.css';
 
 installBoardScrollChaining();
 const root = createRoot(document.getElementById('root')!);

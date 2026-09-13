@@ -5,7 +5,7 @@ Planner Buckets supports two parallel delivery modes that share the same React/V
 - the browser application, which uses browser `localStorage`; and
 - the Windows desktop application, which uses validated files in Tauri's runtime-resolved application-data directory.
 
-This document records the implemented Tauri shell, installer provenance, and durable desktop persistence. Signed updates and release publishing remain issue #41.
+This document records the implemented Tauri shell, installer provenance, durable desktop persistence, and signed-updater boundaries. Detailed signed-release procedures are in `docs/RELEASES.md`.
 
 ## Current Windows support and prerequisites
 
@@ -18,7 +18,7 @@ Building from a checkout requires:
 - Microsoft C++ Build Tools with the **Desktop development with C++** workload; and
 - WebView2.
 
-The Tauri shell uses `@tauri-apps/cli` `2.11.4`, Rust `tauri` `2.11.5`, and `tauri-build` `2.6.3`. The frontend uses the Tauri core invoke API only to call the constrained Planner Buckets storage commands registered by the shell.
+The Tauri shell uses `@tauri-apps/cli` `2.11.4`, Rust `tauri` `2.11.5`, and `tauri-build` `2.6.3`. The frontend uses the Tauri core invoke API only to call constrained Planner Buckets commands registered by the shell.
 
 ## Development and build commands
 
@@ -27,6 +27,7 @@ npm run dev             # browser development server at http://localhost:5173
 npm run build           # browser production build
 npm run desktop:dev     # Tauri window using the Vite development server
 npm run desktop:build   # production Windows NSIS installer
+npm run release:check   # static signed-release/updater contract checks
 ```
 
 `npm run dev` remains the browser application. Tauri uses that command only as its desktop development server and does not create a second frontend.
@@ -43,7 +44,7 @@ On Windows, native Tauri file-drop interception is disabled for the main window 
 src-tauri\target\release\bundle\nsis\
 ```
 
-The configured current-user installer does not require elevated installation and is intended to install outside the Git checkout. It is configured for the normal NSIS Start menu, launch, pinning, and uninstall behavior. Validate those user-facing behaviors through the local installation test before release.
+The configured current-user installer does not require elevated installation and is intended to install outside the Git checkout. It is configured for the normal NSIS Start menu, launch, pinning, and uninstall behavior.
 
 `dist/`, `src-tauri/target/`, installers, application-data files, backups, and exported planner JSON are generated user or build artifacts and are not committed.
 
@@ -75,7 +76,7 @@ Use this policy for an exact acceptance candidate:
 4. Treat any rebuild—even from the same source SHA—as a new candidate with its own identity and evidence.
 5. Prefer the retained hosted candidate over a local build when both exist for the same acceptance cycle.
 
-A retained CI artifact is not a GitHub Release, is not signed update metadata, and is not evidence that packaging is byte-for-byte reproducible. Reproducibility may be claimed only after independent clean builds produce matching installer bytes. Promoted releases remain governed by issue #41 and must either reuse the exact approved candidate bytes or identify a release rebuild as a distinct candidate with a new manifest and acceptance record.
+A retained ordinary-CI artifact is not a GitHub Release, is not signed update metadata, and is not evidence that packaging is byte-for-byte reproducible. Signed-release and promotion rules are documented in `docs/RELEASES.md`.
 
 ## Storage authority and health
 
@@ -123,9 +124,26 @@ Restore uses the App's single validated file-selection path. Preparation creates
 
 The installed writer guard is an exclusive OS file handle scoped to the data directory, not a process-global name or lockfile-existence check. Windows releases it on process exit/crash; a second instance remains explicitly read-only. Different isolated test roots do not contend with production storage.
 
-## Uninstall and lifecycle boundary
+## Signed updater behavior
 
-The authoritative planner and backup directories are application data, not Git checkout files. Issue #60 owns native verification of repair install, uninstall/reinstall, retained application data, optional cleanup behavior, and WebView lifecycle boundaries. Do not claim uninstall survival until that exact installed-candidate matrix is completed.
+The desktop updater is opt-in and Rust-owned. Browser mode does not render updater controls. A desktop user must explicitly choose **Check for updates** and then separately choose **Install and restart** when a newer signed release is available.
+
+The frontend is not granted generic Tauri updater permissions. It calls only the registered Planner Buckets updater commands. The public key is compiled into signed release builds from `TAURI_UPDATER_PUBLIC_KEY`; the private signing key exists only as a GitHub Actions secret.
+
+Before installation begins, Planner Buckets:
+
+1. flushes the existing durable save queue;
+2. passes the exact current planner and native storage session to Rust;
+3. creates and verifies a `pre-update` operation snapshot using the existing storage machinery; and
+4. only then downloads/installs the signature-verified updater artifact.
+
+A failed flush, snapshot, download, signature check or installer launch is surfaced as an error rather than a successful update. The production metadata endpoint is the repository's `latest.json` GitHub Release asset. See `docs/RELEASES.md` for signing-key setup, pre-merge signed validation, tag/release promotion and rollback rules.
+
+## Uninstall and lifecycle evidence
+
+The authoritative planner and backup directories are application data, not Git checkout files. Issue #60 completed the production-identity lifecycle matrix on an isolated hosted Windows environment: install/registration, normal launch, synthetic persistence, same-installer repair, registered uninstall, application-data survival, reinstall, restored state, and corruption recovery all passed for the accepted storage candidate. The lifecycle workflow remains repeatable for future candidates.
+
+The NSIS template also exposes an interactive **Delete app data** choice. Silent hosted lifecycle automation intentionally did not select that option, so ordinary uninstall data survival and explicit data deletion remain distinct behaviors.
 
 Continue making external **Export All data** JSON backups before destructive or release acceptance work.
 
@@ -133,9 +151,9 @@ Continue making external **Export All data** JSON backups before destructive or 
 
 The packaged shell loads only its local frontend. Development uses `http://localhost:5173` and its local Vite WebSocket for hot reload. The CSP allows only these local development connections plus local packaged assets; it allows inline styles because the existing React frontend uses them.
 
-The shell exposes no global Tauri JavaScript object and grants no generic filesystem, shell, process, dialog, broad network, updater, or user-selected-path permission. The frontend can invoke only the registered Planner Buckets storage command surface and the existing clipboard plugin. Rust resolves the application-data paths; the frontend never supplies an arbitrary filesystem destination.
+The shell exposes no global Tauri JavaScript object and grants no generic filesystem, shell, process, dialog, broad network, direct updater, or user-selected-path permission. The frontend can invoke only registered Planner Buckets storage/updater commands and the existing clipboard plugin. Rust resolves application-data paths and owns updater authority; the frontend never supplies an arbitrary filesystem destination or update URL.
 
-Storage is local but is not claimed to be encrypted at rest. Planner data, backups, and migration copies should be protected by the operating-system account and device controls appropriate to the user.
+Storage is local but is not claimed to be encrypted at rest. Planner data, backups, migration copies, and updater signing credentials should be protected by controls appropriate to their role; signing credentials never belong in application data or Git.
 
 ## Scope split
 
@@ -143,29 +161,32 @@ Storage is local but is not claimed to be encrypted at rest. Planner data, backu
 
 - Tauri 2 project, NSIS installer configuration, icons, and constrained capability setup.
 - Browser and desktop development/build commands.
-- Windows CI compilation and local installer validation.
+- Windows CI compilation and installer validation.
 
 ### #40 — durable persistence and backups
 
 - Validated application-data files and browser/desktop storage adapters.
 - Safe replacement, backup retention, recovery candidates, writer exclusion, migration, Restore recovery, and storage-health reporting.
-- Deterministic frontend/Rust validation and narrow installed-Tauri acceptance preparation.
+- Deterministic frontend/Rust validation and installed-Tauri lifecycle acceptance.
 
 ### #41 — signed updater and releases
 
-- Signing keys, updater configuration, tagged release publishing, and automatic update delivery.
+- Tauri updater signing trust root and constrained native update commands.
+- Explicit user-controlled check/install UI with mandatory pre-update durable snapshot.
+- Pre-merge signed candidate validation without publication.
+- Version-tagged browser/Windows GitHub Release assets, signed updater metadata, provenance, rollback documentation, and guarded publication.
 
 ## Validation
 
-Run the browser checks and the Rust shell checks before submitting desktop changes:
+Run the browser checks and Rust shell checks before submitting desktop changes:
 
 ```text
 npm ci
 npm run verify
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 npm run desktop:build
 ```
 
-Also perform exact-head browser-first storage-status/recovery checks and narrow local Windows smoke tests for `npm run desktop:dev`, installed-app restart persistence, writer exclusion, the generated installer, and lifecycle behavior. Record only tests that were genuinely completed.
+Updater/release work additionally requires the repository's release-contract check (included in `npm run verify`) and a successful signed-updater validation run after signing values are configured. Record only tests and release assets that were genuinely completed and bound to the exact source/run.
