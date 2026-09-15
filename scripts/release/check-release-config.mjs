@@ -5,6 +5,9 @@ const fail = (message) => { throw new Error(message); };
 const expectIncludes = (text, value, label) => {
   if (!text.includes(value)) fail(`${label} is missing required value: ${value}`);
 };
+const expectExcludes = (text, value, label) => {
+  if (text.includes(value)) fail(`${label} contains forbidden value: ${value}`);
+};
 
 const pkg = JSON.parse(read('package.json'));
 const tauri = JSON.parse(read('src-tauri/tauri.conf.json'));
@@ -12,6 +15,7 @@ const releaseTauri = JSON.parse(read('src-tauri/tauri.release.conf.json'));
 const cargo = read('src-tauri/Cargo.toml');
 const release = read('.github/workflows/release.yml');
 const signedValidation = read('.github/workflows/signed-updater-validation.yml');
+const verifier = read('scripts/release/verify-updater-signature.rs');
 const capability = read('src-tauri/capabilities/default.json');
 const updater = read('src-tauri/src/desktop_updater.rs');
 
@@ -30,18 +34,38 @@ expectIncludes(release, 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90
 expectIncludes(release, 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020', 'Release workflow');
 expectIncludes(release, 'tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f', 'Release workflow');
 expectIncludes(release, 'softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64', 'Release workflow');
+expectIncludes(release, 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a', 'Release workflow');
 expectIncludes(release, 'TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}', 'Release workflow');
 expectIncludes(release, 'PLANNER_BUCKETS_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}', 'Release workflow');
 expectIncludes(release, "Get-Content 'src-tauri/tauri.release.conf.json' -Raw | ConvertFrom-Json -AsHashtable", 'Release workflow');
 expectIncludes(release, "$config['plugins'] = @{ updater = @{ pubkey = $env:PLANNER_BUCKETS_UPDATER_PUBKEY } }", 'Release workflow');
 expectIncludes(release, 'args: --config "${{ steps.signed-config.outputs.path }}"', 'Release workflow');
 expectIncludes(release, 'releaseDraft: true', 'Release workflow');
-expectIncludes(release, 'gh release edit $env:GITHUB_REF_NAME --draft=false', 'Release workflow');
-if (release.includes('workflow_dispatch:')) fail('Release publication must not be manually dispatched outside an exact version tag.');
+expectIncludes(release, "gh release download $env:GITHUB_REF_NAME --pattern $localInstaller.Name --pattern \"$($localInstaller.Name).sig\" --pattern 'latest.json'", 'Release workflow');
+expectIncludes(release, 'rustc scripts/release/verify-updater-signature.rs', 'Release workflow');
+expectIncludes(release, 'cryptographicSignatureVerified = $true', 'Release workflow');
+expectIncludes(release, 'tamperRejectionVerified = $true', 'Release workflow');
+expectIncludes(release, '$expectedPath = "/Nobodyworld/app-planner-buckets/releases/download/$env:GITHUB_REF_NAME/$($localInstaller.Name)"', 'Release workflow');
+expectIncludes(release, "releaseState = 'draft'", 'Release workflow');
+expectIncludes(release, 'The release remains **draft** after complete asset verification.', 'Release workflow');
+expectExcludes(release, 'gh release edit $env:GITHUB_REF_NAME --draft=false', 'Release workflow');
+if (release.includes('workflow_dispatch:')) fail('Release candidate creation must remain tag-triggered, not manually dispatched.');
 
+expectIncludes(signedValidation, 'github.event.pull_request.head.repo.full_name == github.repository', 'Signed updater validation');
+expectIncludes(signedValidation, "github.actor != 'dependabot[bot]'", 'Signed updater validation');
+expectExcludes(signedValidation, 'feat/signed-desktop-updater', 'Signed updater validation');
 expectIncludes(signedValidation, "Get-Content 'src-tauri/tauri.release.conf.json' -Raw | ConvertFrom-Json -AsHashtable", 'Signed updater validation');
 expectIncludes(signedValidation, "$config['plugins'] = @{ updater = @{ pubkey = $env:PLANNER_BUCKETS_UPDATER_PUBKEY } }", 'Signed updater validation');
 expectIncludes(signedValidation, 'npm run desktop:build -- --config "$env:SIGNED_TAURI_CONFIG"', 'Signed updater validation');
+expectIncludes(signedValidation, 'rustc scripts/release/verify-updater-signature.rs', 'Signed updater validation');
+expectIncludes(signedValidation, 'cryptographicSignatureVerified = $true', 'Signed updater validation');
+expectIncludes(signedValidation, 'tamperRejectionVerified = $true', 'Signed updater validation');
+
+expectIncludes(verifier, 'PublicKey::decode', 'Updater signature verifier');
+expectIncludes(verifier, 'Signature::from_file', 'Updater signature verifier');
+expectIncludes(verifier, '.verify(&bytes, &signature, false)', 'Updater signature verifier');
+expectIncludes(verifier, 'tampered[index] ^= 0x01', 'Updater signature verifier');
+expectIncludes(verifier, 'tampered updater artifact unexpectedly verified', 'Updater signature verifier');
 
 if (capability.includes('updater:')) {
   fail('WebView capability must not expose direct updater plugin permissions.');

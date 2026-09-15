@@ -16,7 +16,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - Clarified that the original planning documents are historical design records and that current source, tests, and README documentation are authoritative.
 - Routed security reports to the private reporting guidance instead of allowing unstructured public security issues.
-- Clarified localStorage privacy notes in the README and security policy.
+- Clarified local-data privacy notes for the browser and desktop storage modes.
 
 ### Fixed
 
@@ -27,7 +27,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Aligned package metadata description with the public README positioning.
 - Added the current `bsp-planner-*.json` export filename pattern to `.gitignore` while preserving the older export pattern.
 
-## [1.2.0] - 2026-09-07
+## [1.2.0] - Unreleased
 
 ### Added
 
@@ -36,6 +36,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Added a signed Tauri desktop updater with explicit user-controlled check/install actions and a mandatory verified `pre-update` durable snapshot before installation.
 - Added a tag-gated GitHub Release pipeline for signed Windows updater assets, `latest.json`, the browser distribution, and exact release provenance.
 - Added repeatable hosted Windows installer lifecycle acceptance for install, repair, uninstall/data survival, reinstall, and corruption recovery.
+- Added cryptographic updater-signature verification plus a tampered-artifact rejection proof to release-sensitive validation.
 
 ### Changed
 
@@ -43,7 +44,10 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Moved maintained CI and release validation to Node 22 while retaining the documented package-compatible Node range.
 - Updated `softprops/action-gh-release` to the full-SHA-pinned 3.0.3 release inside the redesigned release workflow.
 - Updated the npm lockfile to a patched Browserslist 4.28.9 graph and retained zero reported npm vulnerabilities in accepted validation.
+- Updated Vitest from 4.1.10 to 4.1.11 before release promotion to pick up the patched mocker/server security behavior without taking the Vitest 5 major upgrade.
 - Documented the canonical installer candidate, signed-update trust boundary, release promotion, rollback, and updater-key handling procedures.
+- Changed release promotion so a version tag creates and verifies a GitHub Release draft only; publishing the verified draft requires a separate explicit approval.
+- Draft-release verification now downloads the actual GitHub-hosted installer/signature/`latest.json`, compares bytes with the local signed build, and requires the exact tag/asset updater URL.
 
 ### Fixed
 
@@ -51,6 +55,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 - Made desktop Saved/error/Retry state reflect acknowledged durable writes rather than optimistic in-memory completion.
 - Hardened Restore cancellation/commit ordering, WebView reload session renewal, queued-close behavior, and stale-write rejection.
 - Fixed Data-panel clipping, focus-induced pointer target movement, and long native error paths that could hide Retry controls.
+- Removed the stale assumption that a `.sig` file's presence alone proves the updater artifact is trusted; release validation now verifies the signature against the configured public key and requires tamper rejection.
 
 ## [1.1.0] - 2026-07-06
 

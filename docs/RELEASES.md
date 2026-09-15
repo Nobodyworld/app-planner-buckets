@@ -2,25 +2,30 @@
 
 Planner Buckets publishes browser and Windows desktop assets from version tags. The desktop updater is intentionally opt-in: the user checks for an update and explicitly chooses **Install and restart**.
 
+The release process has two separate approval boundaries:
+
+1. **Create candidate:** an explicitly approved version tag starts the release workflow and may create a verified GitHub Release **draft**.
+2. **Promote candidate:** publishing that verified draft requires a second explicit owner approval. The tag workflow does not publish automatically.
+
 ## Trust model
 
 Tauri updater signatures and Windows code signing are separate concerns.
 
-- The Tauri updater public/private key pair proves that update artifacts were signed by the key trusted by the installed Planner Buckets build.
+- The Tauri updater public/private key pair proves that updater artifacts were signed by the key trusted by the installed Planner Buckets build.
 - The updater private key must never be committed, printed in logs, or pasted into issues, pull requests, or chat.
 - This repository does not claim Microsoft Authenticode/SmartScreen publisher trust unless a separate Windows code-signing certificate is configured and accepted later.
 
-The application checks the static updater metadata at:
+The installed updater checks:
 
 ```text
 https://github.com/Nobodyworld/app-planner-buckets/releases/latest/download/latest.json
 ```
 
-The updater plugin verifies the artifact signature before installation. Direct WebView updater permissions are not granted; Planner Buckets exposes only its constrained Rust commands.
+The updater plugin verifies the downloaded artifact signature before installation. Direct WebView updater permissions are not granted; Planner Buckets exposes only constrained Rust commands.
 
 ## One-time signing configuration
 
-Generate the updater key pair outside Git. From a trusted local checkout after `npm ci`, invoke the repo-pinned Tauri CLI rather than relying on a global installation or a nonexistent npm script:
+Generate the updater key pair outside Git. From a trusted local checkout after `npm ci`, invoke the repository-pinned Tauri CLI:
 
 ```powershell
 $KeyDir = Join-Path $HOME '.tauri'
@@ -29,46 +34,79 @@ New-Item -ItemType Directory -Path $KeyDir -Force | Out-Null
 npm exec -- tauri signer generate -w $KeyPath
 ```
 
-Protect the private key and its password as long-lived release credentials. Losing the private key prevents future releases from updating clients that trust its public key.
+Protect the private key and password as long-lived release credentials. Losing either prevents future releases from updating clients that trust the corresponding public key.
 
-Configure these repository values before creating the first updater-enabled version tag:
+Required repository values:
 
 | Name | GitHub storage | Purpose |
 | --- | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | Actions secret | Private updater signing key |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Actions secret | Password when the private key is encrypted; empty only for an intentionally unencrypted key |
-| `TAURI_UPDATER_PUBLIC_KEY` | Actions variable | Public key compiled into signed release builds |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Actions secret | Password for the encrypted private key |
+| `TAURI_UPDATER_PUBLIC_KEY` | Actions variable | Public key trusted by signed release builds |
 
-Do not store the private key in a repository variable or tracked file.
+Do not store private signing material in a repository variable or tracked file.
 
 ## Pre-merge signed validation
 
-PR #89 adds `Signed updater validation`, a same-repository pull-request workflow that never publishes a GitHub Release.
+Release/updater-sensitive same-repository pull requests run `Signed updater validation`. Dependabot pull requests do not receive signing secrets; dependency-only updates use normal CI unless deliberately integrated into a trusted release-hardening branch.
 
-Before the signing values exist, the workflow fails at its signing-configuration gate rather than reporting a misleading successful skipped build. After the values are configured, the exact PR-head job:
+The signed validation job:
 
-- runs the normal source, TypeScript/Vite and locked Rust validation;
-- materializes a runner-local Tauri release config by combining the tracked release settings with the repository public-key variable;
-- builds with the private signing key while keeping both the private key and real public key out of tracked source;
-- requires exactly one NSIS installer and its `.exe.sig` updater signature;
-- records the exact PR source SHA separately from GitHub's synthetic workflow merge SHA, plus installer size/hash and signature hash;
-- confirms tracked source inputs remained unchanged; and
-- retains the signed candidate as a 30-day Actions artifact without publishing it.
+- checks out the exact pull-request head;
+- runs the normal browser/release contract plus locked Rust format/Clippy/tests;
+- materializes a runner-local Tauri release config using `TAURI_UPDATER_PUBLIC_KEY`;
+- builds a signed NSIS updater candidate without publishing;
+- cryptographically verifies the generated `.sig` against the configured public key using the already locked `minisign-verify` dependency;
+- mutates a copy of the artifact and requires that tampered bytes are rejected;
+- records exact source/run, installer size/hash, signature hash, and the positive/negative verification results;
+- confirms tracked source inputs were not changed; and
+- retains the signed candidate as an Actions artifact.
 
-This is the required pre-merge proof that the repository's configured signing material can build the proposed updater path without consuming a version tag or creating a public release.
+A `.sig` file merely existing is not sufficient release evidence.
 
-## Release sequence
+## Candidate creation sequence
 
-1. Merge a fully accepted release candidate to `main`.
-2. Confirm `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` all declare the same version and that no tag for that version already exists.
-3. Confirm CI, storage lifecycle, security, and signed-updater validation are green.
-4. Create the exact `vMAJOR.MINOR.PATCH` tag only after explicit release approval.
-5. The `Release` workflow validates the tag/version identity before any GitHub Release is created.
-6. The Windows release job requires the signing secret and public-key variable, materializes the runner-local signed Tauri config, builds updater artifacts with `createUpdaterArtifacts: true`, and lets pinned Tauri Action create a **draft** release plus `latest.json`.
-7. The workflow verifies the signed NSIS artifact and `latest.json`, adds the browser ZIP and `release-provenance.json`, verifies the complete draft asset set, and only then publishes the release.
-8. Record the final source SHA, run ID, installer/update hashes, `latest.json` hash, and release URL as the promoted candidate identity.
+Before approving a version tag:
 
-A failed validation/build/upload leaves no misleading published complete release.
+1. Merge the fully accepted release candidate to `main`.
+2. Confirm `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` declare the same version.
+3. Confirm that tag/release do not already exist.
+4. Confirm exact-head CI, installed lifecycle, security/audit, and signed-updater validation are green.
+5. Review the release notes and rollback boundary.
+6. Obtain explicit approval to create the exact `vMAJOR.MINOR.PATCH` tag.
+
+After an approved tag is pushed, the `Release` workflow:
+
+1. validates tag/version identity and the browser application;
+2. requires the signing secrets and public-key variable;
+3. materializes a runner-local signed Tauri configuration;
+4. builds signed Tauri updater artifacts and creates/reuses a GitHub Release **draft**;
+5. downloads the draft's actual NSIS installer, `.sig`, and `latest.json` back from GitHub;
+6. requires the downloaded installer bytes and signature to match the local signed build;
+7. cryptographically verifies the downloaded installer signature and proves a tampered copy is rejected;
+8. requires exactly one Windows x86_64 updater entry in `latest.json`, with the exact tag and exact installer asset URL;
+9. creates the browser ZIP and schema-v2 `release-provenance.json` with cryptographic/tamper verification flags;
+10. uploads supplemental assets and verifies the complete draft asset set; and
+11. **leaves the release draft/unpublished** while retaining verification evidence as an Actions artifact.
+
+A failed build or verification must never result in a published complete release.
+
+## Draft review and promotion
+
+Before publication, independently review the exact draft and retained workflow evidence. At minimum record:
+
+- version tag and exact source SHA;
+- workflow run/attempt;
+- installer filename, byte size, and SHA-256;
+- updater `.sig` SHA-256;
+- `latest.json` SHA-256 and exact updater URL;
+- browser ZIP SHA-256;
+- release-provenance SHA-256/content;
+- proof that cryptographic signature verification passed;
+- proof that tamper rejection passed; and
+- confirmation that the GitHub Release is still a draft.
+
+Publishing the draft requires a separate explicit owner approval. After approval, publish **that existing verified draft**; do not rebuild or retag merely to publish it. If the draft assets or tag change after verification, treat that as a new candidate and re-verify before promotion.
 
 ## In-app installation sequence
 
@@ -78,29 +116,25 @@ When the user chooses **Install and restart**:
 2. the durable planner save queue is flushed;
 3. the current desktop storage session and exact planner state are supplied to the constrained native updater command;
 4. Rust creates and verifies a `pre-update` operation snapshot through the established durable-storage path;
-5. only after that snapshot succeeds does the signed updater download/install begin;
-6. Tauri verifies the update signature; Windows may close the application as the installer launches.
+5. only after that snapshot succeeds does signed updater download/install begin; and
+6. Tauri verifies the update signature before installation.
 
-If flushing, snapshot creation, update download, signature verification, or installer launch fails, the failure is reported and update installation is not treated as successful.
+If flushing, snapshot creation, metadata/download, signature verification, or installer launch fails, the failure is reported and update installation is not treated as successful.
 
 ## First updater-enabled release boundary
 
-Version `1.1.0` predates this updater implementation. It cannot discover or install `1.2.0` through an updater it does not contain. Therefore the first updater-enabled `1.2.0` release can establish the signing trust root, signed artifacts, `latest.json`, user controls, backup-before-install contract, and release provenance, but it cannot by itself prove a production `1.1.0 -> 1.2.0` in-app update.
+Version `1.1.0` predates the updater implementation. It cannot discover or install `1.2.0` through an updater it does not contain. Therefore `1.2.0` establishes the production signing trust root, signed assets, `latest.json`, user controls, backup-before-install contract, and release provenance; it cannot prove a production `1.1.0 → 1.2.0` in-app transition.
 
-Do not manufacture or publish a throwaway public tag merely to simulate that upgrade. The first real production in-app updater transition can be observed when a later accepted version exists (for example `1.2.1`), or earlier in an isolated acceptance environment using explicitly test-only signed metadata that cannot affect the production endpoint.
+Do not manufacture a throwaway public release to simulate that transition. A later accepted updater-enabled version (for example `1.2.1`) must prove the real production path:
 
-Before promoting `1.2.0`, verify at minimum:
-
-- the signed pre-merge candidate and signature are bound to the exact source;
-- the tag-generated draft release contains the expected signed NSIS artifact, signature, `latest.json`, browser ZIP and provenance before publication;
-- the production `1.2.0` build recognizes its updater configuration and does not install without explicit user action;
-- a controlled invalid/tampered signature or metadata case is rejected in an isolated test boundary where it can be demonstrated safely;
-- the promoted assets match the exact tag/run being released.
-
-A later production update acceptance must additionally prove update detection, the `pre-update` operation snapshot, update/restart, and planner-data survival end to end.
+- prior updater-enabled version detects the new release;
+- installation still requires explicit user action;
+- the `pre-update` operation snapshot exists before installation;
+- update/restart succeeds; and
+- planner data and recovery behavior survive end to end.
 
 ## Rollback
 
-The normal updater only accepts newer versions. Keep the previous accepted installer and its provenance available as rollback evidence. If a release must be rolled back, first preserve an external All-data JSON export and the durable backup directory, then follow an explicitly approved rollback procedure rather than changing updater version comparison or publishing unsigned/downgrade metadata.
+The normal updater accepts newer versions; rollback is not an unsigned downgrade mechanism. Retain the previous accepted installer and provenance. If rollback is necessary, first preserve an external **All data** JSON export plus durable backup evidence, then follow an explicitly approved rollback procedure.
 
-Do not rotate the updater signing key casually. A future key-rotation plan must preserve a verified trust path for already-installed clients before changing the embedded public key.
+Do not rotate the updater signing key casually. Any key-rotation plan must preserve a verified trust path for already-installed clients before changing the embedded public key.

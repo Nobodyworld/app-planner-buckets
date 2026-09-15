@@ -2,63 +2,55 @@
 
 Local-first planning board for projects, buckets, and tasks.
 
-Planner Buckets runs fully in your browser with no backend required, while still supporting practical workflows like templates, archived-task handling, import/export, and undo/redo.
+Planner Buckets supports both a browser application and a Windows desktop application built from the same React/Vite frontend and planner schema. No backend or account is required.
 
-See [Project-native workspace workflows](docs/PROJECT_NATIVE_WORKSPACE.md) for
-board navigation, Quick Add, explicit selection, copy/export/import, Restore
-recovery, paste Undo, and the synthetic physical-acceptance checklist.
+See [Project-native workspace workflows](docs/PROJECT_NATIVE_WORKSPACE.md) for board navigation, Quick Add, explicit selection, copy/export/import, Restore recovery, paste Undo, and the synthetic physical-acceptance checklist.
 
 ## Delivery modes
 
-Planner Buckets is keeping the existing browser application while adding an installable Windows desktop application.
-
 ### Web application
 
-The current supported application runs through React and Vite.
+The browser application remains fully supported.
 
-- No backend or account is required.
 - Planner data is stored in browser `localStorage`.
-- JSON export, upload, and restore provide data portability.
+- JSON export, import, and Restore provide portability and backup options.
 - Local development uses the commands in [Web quick start](#web-quick-start).
 
 ### Windows desktop application
 
-The Windows desktop shell is implemented in [#39](https://github.com/Nobodyworld/app-planner-buckets/issues/39) alongside the browser application. It wraps the same React/Vite frontend in Tauri 2 and builds an NSIS installer.
+The Windows application wraps the same frontend in Tauri 2 and builds a current-user NSIS installer.
 
-- Its NSIS configuration targets normal current-user Windows installation and Start menu behavior.
-- It keeps the existing planner schema and JSON interchange format unchanged.
-- It is transitional: desktop data currently lives in that app's WebView `localStorage`.
-- Durable application-data files and automatic backups are scoped to [#40](https://github.com/Nobodyworld/app-planner-buckets/issues/40).
-- Signed updates and release publishing are scoped to [#41](https://github.com/Nobodyworld/app-planner-buckets/issues/41).
+- Planner data is stored in validated files under Tauri's runtime-resolved application-data directory, not in the Git checkout.
+- Durable writes use verified replacement, recovery candidates, automatic routine and operation backups, writer exclusion, and corruption recovery.
+- The Data panel reports the resolved planner and backup locations.
+- Restore and Undo use durable native recovery snapshots.
+- Normal close drains queued saves and blocks on an outstanding failed save.
+- The signed updater is Rust-owned and opt-in: the user chooses **Check for updates** and, when an update is available, separately chooses **Install and restart**.
+- Before updater installation begins, pending saves are flushed and a verified `pre-update` operation snapshot is created.
 
-Continue exporting JSON backups. To migrate data from the browser, choose the
-**All data** export scope in the browser application, export the JSON, and then
-**Restore** that raw full-planner file in the desktop application. Newly
-generated Project, Bucket, and Unassigned exports use a versioned scope tag and
-are exchange files rather than full backups; Restore refuses them and directs
-you to **Import project JSON**. Legacy raw v1/v2 backups remain compatible. See
-[Desktop distribution](docs/DESKTOP.md) for prerequisites, installation, and
-current limitations.
+Issue #40 delivered durable desktop persistence and issue #41 delivered the signed updater/release infrastructure. Detailed desktop behavior is documented in [Desktop distribution](docs/DESKTOP.md); signed release procedures are in [Signed desktop releases](docs/RELEASES.md).
+
+To move planner data from the browser to desktop, choose the **All data** export scope in the browser and **Restore** that raw full-planner file in the desktop application. Project, Bucket, and Unassigned exports are exchange files rather than complete backups; Restore refuses them and directs you to **Import project JSON**. Legacy raw v1/v2 backups remain compatible.
 
 ## Why this exists
 
-Most lightweight planning apps are either too minimal for real work or too dependent on cloud setup. Planner Buckets is designed for people who want:
+Planner Buckets is designed for people who want:
 
-- A fast, visual planning surface
-- Durable local workflows without account friction
-- Portable JSON data they can back up, audit, and move
+- a fast visual planning surface;
+- durable local workflows without account friction; and
+- portable JSON data they can back up, audit, and move.
 
 ## Privacy and local data
 
-Planner data is stored in your browser localStorage.
+Planner Buckets has no cloud account or backend.
 
-- Data stays on your machine unless you explicitly export and share JSON
-- Import, export, and Restore are user-triggered actions only
-- Clipboard actions write task text, project Markdown, or bucket JSON only when
-  you trigger them
-- Local data is not encrypted by the app; do not store secrets, credentials, or sensitive private records in task text
+- Browser mode stores planner data in browser `localStorage`.
+- Desktop mode stores planner data and backups in the application's local application-data directory.
+- Data stays on your machine unless you explicitly export, copy, or share it.
+- Import, export, Restore, clipboard actions, and updater installation are user-triggered.
+- Local planner data and backups are not claimed to be encrypted at rest. Do not store credentials or secrets in task text.
 
-If you clear site storage, local data is removed. Use Export JSON for backups.
+Use **Export All data** for an external backup before destructive maintenance, release acceptance, or moving between environments.
 
 ## Gallery
 
@@ -79,18 +71,14 @@ Project and board management:
 - Permanent Unassigned lane for unbucketed tasks
 - Pin buckets into the left group for stable triage workflows
 - Two-axis board navigation with persistent 70%-110% zoom
-- Quick Add targeting an existing or new project and bucket; Enter submits from
-  Task title, Bucket, or Project, Tab accepts an applicable suggestion and moves
-  forward, Shift+Tab moves backward without submitting, Up/Down Arrow navigate
-  suggestions, Escape closes them, and Add performs the same submission
+- Quick Add targeting an existing or new project and bucket
 
 Task workflow:
 
 - Create, edit, delete, pin, and complete tasks
 - Drag-and-drop task ordering within and across buckets
 - Explicit task and whole-bucket selection, separate from completion
-- Copy selected tasks and paste into target buckets with a latest-batch
-  Keep/Undo notice
+- Copy selected tasks and paste into target buckets with a latest-batch Keep/Undo notice
 - Search by task title and description
 
 Template workflow:
@@ -102,15 +90,10 @@ Template workflow:
 Data and safety controls:
 
 - Readable project Markdown and structured bucket JSON copy
-- Raw All-data backups plus scope-tagged Project, Bucket, and Unassigned JSON
-  exchange exports
-- Explicit source and new/existing destination choices for project import
-- Frozen, one-to-one import reuse that preserves duplicate-named source
-  templates, definitions, buckets, and task mappings
-- Task import skips only exact semantic duplicates, including task state and
-  normalized resource tags
-- Full-planner Restore with confirmation, a pre-replacement recovery snapshot,
-  operation-specific Undo, and scoped-exchange rejection
+- Raw All-data backups plus scope-tagged Project, Bucket, and Unassigned JSON exchange exports
+- Explicit source and destination choices for project import
+- Full-planner Restore with confirmation, pre-replacement recovery snapshot, operation-specific Undo, and scoped-exchange rejection
+- Desktop automatic backups, safe replacement, recovery diagnostics, Retry save, and corruption preservation
 - Undo/redo history around reducer actions
 
 UX controls:
@@ -125,10 +108,10 @@ UX controls:
 
 Requirements:
 
-- Node.js 20.19+, 22.12+, or 24.x
+- Node.js 20.19+, 22.12+, or 24.x as permitted by the package engine range. Maintained CI and release validation use Node 22.
 
 ```bash
-npm install
+npm ci
 npm run dev
 ```
 
@@ -141,7 +124,7 @@ Use either:
 - `start-local.cmd`
 - `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-local.ps1`
 
-These scripts start the web development server from a local checkout. They are not desktop installers and still require the repository and Node.js.
+These scripts start the web development server from a checkout. They are not desktop installers.
 
 ## Testing and quality
 
@@ -153,24 +136,22 @@ npm run verify
 npm run build
 ```
 
-`npm run verify` is the primary pre-PR validation gate used by CI. CI runs on Node.js 20.19.0, the minimum supported Node 20 runtime.
+`npm run verify` runs the static release contract, test suite, TypeScript compilation, and Vite production build. Maintained hosted CI uses Node 22 and separately validates the Rust shell and Windows NSIS packaging.
 
 ## Desktop development and installation
 
-The Windows shell supports Windows 10 version 1803 or later and Windows 11 when Microsoft Edge WebView2 is available. Building it requires Node.js 20.19+, 22.12+, or 24.x, Rust stable with the `x86_64-pc-windows-msvc` host, and Microsoft C++ Build Tools with **Desktop development with C++** installed.
+The Windows shell targets Windows 10 version 1803 or later and Windows 11 with Microsoft Edge WebView2 available. Building it requires maintained Node.js 22/24, Rust stable with the `x86_64-pc-windows-msvc` host, Microsoft C++ Build Tools with **Desktop development with C++**, and WebView2.
 
 ```bash
 npm run desktop:dev
 npm run desktop:build
 ```
 
-`npm run dev` remains the browser development command, and `npm run build` remains the browser production build. The desktop build produces an NSIS installer under `src-tauri\\target\\release\\bundle\\nsis\\`; that generated output is not committed. The current-user installer configuration is designed to add a normal Start menu entry and use standard Windows pinning and uninstall controls; verify those behaviors through a local installation test before release.
-
-The desktop shell does not yet provide durable file storage, automatic backups, or signed updates. Keep exporting JSON backups and do not treat WebView `localStorage` as data-loss protection.
+`npm run desktop:build` produces an NSIS installer under `src-tauri\target\release\bundle\nsis\`; generated build output is not committed. Hosted CI retains exact installer candidates with SHA-256 and provenance for acceptance. See [Desktop distribution](docs/DESKTOP.md) for the storage, lifecycle, updater, and installer contracts.
 
 ## Architecture (v2)
 
-The app now runs on a v2 data model (`PlannerDataV2`) with explicit entities for projects, buckets, tasks, templates, and template definitions.
+The application uses the v2 data model (`PlannerDataV2`) with explicit projects, buckets, tasks, templates, and template definitions.
 
 ```mermaid
 flowchart LR
@@ -178,45 +159,48 @@ flowchart LR
    Actions --> History[Undo/Redo Wrapper]
    History --> Reducer[plannerReducer v2]
    Reducer --> State[PlannerDataV2]
-   State --> Persist[plannerPersistence localStorage v2]
-   Persist --> ImportExport[Scoped Export Project Import Full Restore]
+   State --> Runtime{Runtime}
+   Runtime -->|Browser| LocalStorage[Browser localStorage]
+   Runtime -->|Desktop| NativeStore[Validated app-data files + backups]
+   State --> ImportExport[Scoped Export / Project Import / Full Restore]
    ImportExport --> Validation[Schema and integrity validators]
    Validation --> State
+   UI -->|Desktop only| Updater[Constrained Rust signed updater]
+   Updater --> Snapshot[Verified pre-update snapshot]
 ```
 
 v2 notes:
 
-- Migration path from v1 to v2 is built into persistence loading
-- Integrity validators enforce relational consistency across projects, buckets, tasks, and template definitions
-- Local storage uses versioned keys for safer recovery behavior
-
-The desktop shell currently retains the browser persistence implementation in its WebView. A runtime-selected desktop persistence adapter with validated application-data files and backups is intentionally deferred to issue #40.
+- Migration from v1 to v2 is built into persistence loading.
+- Integrity validators enforce relational consistency across projects, buckets, tasks, templates, and template definitions.
+- Browser storage uses versioned localStorage keys.
+- Desktop storage uses the shared schema with native safe-write/recovery semantics and keeps legacy WebView data only as preserved migration evidence.
 
 ## Repository map
 
 - `src/App.tsx`: primary composition, controls, and UI wiring
 - `src/state/plannerReducerV2.ts`: deterministic state transitions
-- `src/services/plannerPersistence.ts`: v1/v2 loading, migration, and browser persistence
+- `src/services/plannerPersistence.ts`: browser v1/v2 loading and migration
+- `src/storage/`: runtime-selected browser/desktop persistence and durable queue logic
+- `src-tauri/src/desktop_storage.rs`: native durable storage, backup, recovery, and writer exclusion
+- `src-tauri/src/desktop_updater.rs`: constrained signed updater bridge
 - `src/types/v2.ts`: v2 schema contracts
 - `src/types/validators.ts`: structural and relational validation rules
-- `src/services/plannerExchange.ts`: deterministic project Markdown and bucket
-  JSON copy formats
-- `src/services/plannerExport.ts`: scoped payloads, project envelopes, and
-  filenames
-- `src/services/plannerProjectImport.ts`: explicit source/destination project
-  import planning
-- `src/components/`: board and editor UI components
+- `src/services/plannerExport.ts`: scoped payloads and filenames
+- `src/services/plannerProjectImport.ts`: explicit project import planning
 - `docs/DESKTOP.md`: desktop distribution, persistence, update, and validation contract
-- `docs/PROJECT_NATIVE_WORKSPACE.md`: project-native workflow and acceptance
-  guide
+- `docs/RELEASES.md`: signing, release-candidate, promotion, and rollback contract
+- `docs/PROJECT_NATIVE_WORKSPACE.md`: project-native workflow and acceptance guide
 
-`PLAN.md` and `PLAN_V2.md` are retained as historical design records. Current source, tests, and this README are authoritative when an older plan differs from the implementation.
+`PLAN.md` and `PLAN_V2.md` are retained as historical design records. Current source, tests, and maintained documentation are authoritative when an older plan differs from the implementation.
 
-## Release
+## Release status
 
-Current stable web showcase baseline: `1.1.0`.
+The current public stable baseline is `v1.1.0`.
 
-Public release artifacts are managed through GitHub Releases. Windows installer artifacts will be added only after the desktop shell, durable persistence, and signed update path meet their tracked acceptance criteria.
+`main` contains the `1.2.0` desktop/updater release candidate, but `v1.2.0` has **not** been tagged or published yet. Release hardening is tracked in issue #92. Creating the tag may only produce a verified **draft** release; publishing that draft requires a separate explicit promotion approval.
+
+Because `v1.1.0` predates the updater, it cannot perform an in-app update to `1.2.0`. The first published `1.2.0` establishes the updater trust root. A later updater-enabled release must prove the first production prior-version → update → restart/data-survival path.
 
 The exact pre-desktop source baseline is preserved on `archive/web-v1.1.0-baseline-2026-07-14` at commit `61dc19147c3a82c27ecfa2796854376a409835d9`.
 
