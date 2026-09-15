@@ -1,99 +1,85 @@
-# Signed desktop updater and release execution plan
+# v1.2.0 release hardening execution plan
 
-Issue: #41
-Baseline: `main` at `1c7d5af5689adc55b22dd5cc4a796116c506486a`
-Branch: `feat/signed-desktop-updater`
+Issue: #92
+Baseline: `main` at `c43328692fa8227903950bec3f05fb98313b479b`
+Branch: `release/v1.2.0-hardening`
+
+## Context
+
+Issue #41 and PR #89 completed the signed desktop updater and GitHub Release implementation. The merged source is version `1.2.0`, but no `v1.2.0` tag or GitHub Release exists yet.
+
+This follow-up hardens the promotion boundary before the first updater-enabled public release. It does not redesign the updater or durable storage.
 
 ## Objective
 
-Add a signed, user-approved Windows updater and a GitHub Release pipeline without weakening the durable-storage guarantees merged in #40.
+Make the first `1.2.0` promotion evidence cryptographically meaningful and keep candidate creation separate from publication.
 
-## Design decisions
+## Required corrections
 
-- Keep browser mode unchanged; updater UI and commands are desktop-only.
-- Keep updater authority in Rust. Do not grant the WebView direct `updater:*` permissions.
-- Check GitHub Releases through Tauri's signed updater client using the static `latest.json` endpoint.
-- Require explicit user confirmation before install.
-- Flush pending planner writes and create a verified `pre-update` operation snapshot immediately before updater installation. If either step fails, installation does not begin.
-- Use Tauri v2 updater artifacts (`bundle.createUpdaterArtifacts: true`), not v1-compatible bundles.
-- Keep ordinary CI unsigned. Signing is release-only.
-- Never commit the updater private key, key password, GitHub tokens, generated installer signatures, or machine-specific paths.
-- Generate/update releases only after validation has succeeded; a failed build must not publish a misleading complete release.
+- Include the minimal Vitest 4.1.11 patch that resolves the current 4.1.10 mocker/server security advisory without taking the Vitest 5 major upgrade or broader dependency bundle.
+- Make signed-updater validation reusable for future same-repository release-sensitive pull requests instead of binding it to the historical #89 branch name.
+- Treat presence of an updater `.sig` as insufficient; cryptographically verify it against `TAURI_UPDATER_PUBLIC_KEY`.
+- Require a deliberately tampered copy of the installer to fail verification.
+- During tag workflow validation, download the draft release's actual installer, signature, and `latest.json` from GitHub and compare them with the local signed build.
+- Require `latest.json` to identify the exact triggering tag and exact NSIS asset, not merely any URL under this repository's release-download namespace.
+- Generate schema-v2 release provenance that records cryptographic verification and tamper rejection.
+- Leave the tag-generated GitHub Release as a verified **draft**.
+- Require a separate explicit owner approval to publish that existing draft.
+- Correct README, changelog, release guide, and desktop documentation so they match the merged implementation and unpublished `1.2.0` state.
 
-## Runtime contract
+## Security and trust boundaries
 
-Rust owns:
+- Never commit the updater private key or key password.
+- Use the repository public-key variable only in runner-local Tauri release configuration and verification.
+- Reuse the locked transitive `minisign-verify` crate already built by the Tauri updater dependency; do not add another network-downloaded verifier or a new direct dependency solely for CI verification.
+- The verification helper must prove both the valid signature and rejection of changed artifact bytes.
+- Dependabot pull requests do not receive signing secrets.
+- Ordinary CI remains unsigned.
 
-- updater plugin initialization;
-- static HTTPS endpoint configuration;
-- embedded updater public key supplied at release build time;
-- pending-update state;
-- update check metadata;
-- verified pre-update snapshot;
-- signed updater download/install.
+## Validation contract
 
-Frontend owns:
-
-- a desktop-only update card;
-- explicit check action;
-- update-available/no-update/error states;
-- explicit `Install and restart` confirmation;
-- planner save-queue flush before invoking native install;
-- blocking conflicting planner interaction once installation begins.
-
-No direct updater plugin permission is exposed to the WebView.
-
-## Release contract
-
-- All application version declarations must match the `vMAJOR.MINOR.PATCH` release tag.
-- Release validation uses maintained Node 22 and the repository's pinned Rust toolchain behavior.
-- The release workflow builds the verified web distribution and the Windows NSIS/updater artifacts from the exact tag commit.
-- Tauri updater signing uses GitHub Actions secrets only.
-- Tauri Action is pinned to a full commit SHA and creates the GitHub Release assets plus `latest.json`.
-- Releases begin as drafts and become publishable only when all required artifacts and signatures exist.
-- Release notes distinguish the browser build from the Windows installer/updater assets.
-- Exact source SHA, run identity, installer/update artifact hashes, signatures, and updater metadata are retained as acceptance evidence.
-
-## Required GitHub configuration
-
-Before a real signed release can be accepted, the repository must have:
-
-- `TAURI_SIGNING_PRIVATE_KEY` — secret containing the updater private key;
-- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — secret when the key is password protected;
-- `TAURI_UPDATER_PUBLIC_KEY` — repository variable or secret containing the corresponding public key.
-
-The private key must be generated and stored outside Git and must never be pasted into repository files or public logs.
-
-## Validation
-
-Before merge:
+Before merge of the hardening PR:
 
 - `npm ci`
 - `npm run verify`
+- zero unresolved npm audit findings relevant to the locked graph
 - Rust formatting, locked strict Clippy, and locked Rust tests
-- ordinary NSIS build
-- updater command/unit coverage with a fake updater boundary where practical
-- browser-first update-card acceptance with synthetic update responses
-- workflow/config static checks proving secrets are referenced but not embedded
+- ordinary NSIS build/provenance
+- browser/storage acceptance regression
+- installed Windows lifecycle regression
+- signed-updater validation on the exact human-owned PR head
+- retained signed evidence showing cryptographic verification PASS and tamper rejection PASS
 
-Before the first promoted release:
+No local owner rerun is required when hosted exact-head evidence covers these boundaries credibly.
 
-- generate/configure the signing key pair;
-- build a signed candidate from a version tag;
-- verify installer/update signatures and `latest.json` against the exact source/run;
-- install a prior accepted version in an isolated Windows environment;
-- confirm update detection;
-- confirm the user must approve installation;
-- confirm a pre-update operation snapshot exists before installation;
-- confirm update/restart preserves planner data;
-- confirm invalid/tampered metadata or signature is rejected;
-- verify rollback documentation and preserved prior installer/data.
+## Release-candidate boundary after merge
+
+After this slice is merged and post-merge `main` is green:
+
+1. Review exact `main`, version identity, open release-blocking issues, and tag/release absence.
+2. Obtain explicit owner approval before creating `v1.2.0`.
+3. Create the tag at that exact accepted `main` SHA.
+4. Let the tag workflow create and fully verify a **draft** release.
+5. Inspect retained draft evidence and the actual GitHub Release assets.
+6. Obtain a second explicit owner approval before publication.
+7. Publish the existing verified draft without rebuilding or moving the tag.
+
+Any asset, source, or tag change after draft verification invalidates the promotion decision and requires re-verification.
+
+## First updater-enabled release limitation
+
+`v1.1.0` predates the updater and cannot update itself to `1.2.0`. Do not treat that as a product failure and do not publish a throwaway version to manufacture an updater transition.
+
+For `1.2.0`, required acceptance covers signing trust, explicit update controls, pre-update snapshot enforcement, signature verification/tamper rejection, installed lifecycle, and exact release provenance.
+
+A later updater-enabled release must add the real production prior-version → update → restart/data-survival acceptance.
 
 ## Out of scope
 
+- Vitest 5 or other unrelated major dependency upgrades;
+- broad dependency refreshes not required for release safety;
 - cloud accounts or sync;
 - silent update installation;
-- auto-generated signing secrets committed to Git;
-- replacing durable backup/recovery logic;
-- unrelated dependency/test-warning cleanup;
-- claiming code-signing/SmartScreen trust unless a separate Windows code-signing certificate is configured and tested.
+- Authenticode/SmartScreen publisher-trust claims;
+- redesigning durable persistence, backup retention, or WebView/browser storage;
+- creating or publishing the `v1.2.0` release within this implementation PR.

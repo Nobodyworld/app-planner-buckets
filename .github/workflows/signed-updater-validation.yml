@@ -2,15 +2,28 @@ name: Signed updater validation
 
 on:
   pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/signed-updater-validation.yml'
+      - 'scripts/release/**'
+      - 'src-tauri/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'src/components/sidepanel/DesktopUpdateCard.tsx'
+      - 'src/components/sidepanel/DesktopUpdateCard.test.tsx'
+      - 'src/services/desktopUpdater.ts'
+      - 'src/services/desktopUpdater.test.ts'
+      - 'src/storage/plannerStorageBridge.ts'
+      - 'src/storage/plannerStorageRuntime.ts'
 
 permissions:
   contents: read
 
 jobs:
   signed-updater:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/signed-desktop-updater'
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     env:
       PLANNER_BUCKETS_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -73,36 +86,70 @@ jobs:
           SIGNED_TAURI_CONFIG: ${{ steps.signed-config.outputs.path }}
         run: npm run desktop:build -- --config "$env:SIGNED_TAURI_CONFIG"
 
-      - name: Verify signed updater candidate
-        id: evidence
+      - name: Cryptographically verify signature and tamper rejection
+        id: crypto
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $installer = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*-setup.exe')
           if ($installer.Count -ne 1) { throw "Expected one NSIS installer; found $($installer.Count)." }
-          $signature = "$($installer[0].FullName).sig"
-          if (-not (Test-Path -LiteralPath $signature)) { throw 'Signed updater signature is missing.' }
+          $encodedSignature = "$($installer[0].FullName).sig"
+          if (-not (Test-Path -LiteralPath $encodedSignature)) { throw 'Signed updater signature is missing.' }
+
+          $publicKeyPath = Join-Path $env:RUNNER_TEMP 'planner-buckets-updater.pub'
+          $decodedSignaturePath = Join-Path $env:RUNNER_TEMP 'planner-buckets-updater.minisig'
+          try {
+            $publicKeyBytes = [Convert]::FromBase64String($env:PLANNER_BUCKETS_UPDATER_PUBKEY)
+            $signatureBytes = [Convert]::FromBase64String((Get-Content -LiteralPath $encodedSignature -Raw).Trim())
+          } catch {
+            throw 'Updater public key or signature is not valid Tauri base64-wrapped Minisign content.'
+          }
+          [IO.File]::WriteAllBytes($publicKeyPath, $publicKeyBytes)
+          [IO.File]::WriteAllBytes($decodedSignaturePath, $signatureBytes)
+
+          $rlib = @(Get-ChildItem src-tauri/target/release/deps -File -Filter 'libminisign_verify-*.rlib')
+          if ($rlib.Count -ne 1) { throw "Expected one minisign-verify rlib; found $($rlib.Count)." }
+          $verifier = Join-Path $env:RUNNER_TEMP 'verify-updater-signature.exe'
+          rustc scripts/release/verify-updater-signature.rs --edition 2021 --extern "minisign_verify=$($rlib[0].FullName)" -o $verifier
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to compile updater signature verifier.' }
+          & $verifier $installer[0].FullName $decodedSignaturePath $publicKeyPath
+          if ($LASTEXITCODE -ne 0) { throw 'Updater signature verification or tamper-rejection proof failed.' }
+          "installer=$($installer[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "signature=$encodedSignature" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Verify signed updater candidate
+        id: evidence
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installerPath = '${{ steps.crypto.outputs.installer }}'
+          $signature = '${{ steps.crypto.outputs.signature }}'
+          if (-not (Test-Path -LiteralPath $installerPath)) { throw 'Signed updater installer is missing after cryptographic verification.' }
+          if (-not (Test-Path -LiteralPath $signature)) { throw 'Signed updater signature is missing after cryptographic verification.' }
+          $installer = Get-Item -LiteralPath $installerPath
           if ((Get-Item -LiteralPath $signature).Length -lt 16) { throw 'Signed updater signature is unexpectedly short.' }
           $package = Get-Content package.json -Raw | ConvertFrom-Json
           $evidenceRoot = Join-Path $env:RUNNER_TEMP 'signed-updater-evidence'
           New-Item -ItemType Directory -Path $evidenceRoot -Force | Out-Null
-          Copy-Item -LiteralPath $installer[0].FullName -Destination $evidenceRoot
+          Copy-Item -LiteralPath $installer.FullName -Destination $evidenceRoot
           Copy-Item -LiteralPath $signature -Destination $evidenceRoot
-          $installerHash = (Get-FileHash -LiteralPath $installer[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $installerHash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $signatureHash = (Get-FileHash -LiteralPath $signature -Algorithm SHA256).Hash.ToLowerInvariant()
           [ordered]@{
-            schemaVersion = 1
+            schemaVersion = 2
             applicationVersion = [string]$package.version
             sourceSha = '${{ github.event.pull_request.head.sha }}'
             workflowMergeSha = $env:GITHUB_SHA
             pullRequestHead = '${{ github.event.pull_request.head.sha }}'
             workflowRunId = $env:GITHUB_RUN_ID
             workflowRunAttempt = $env:GITHUB_RUN_ATTEMPT
-            installerFile = $installer[0].Name
-            installerSizeBytes = $installer[0].Length
+            installerFile = $installer.Name
+            installerSizeBytes = $installer.Length
             installerSha256 = $installerHash
             signatureFile = (Split-Path $signature -Leaf)
             signatureSha256 = $signatureHash
+            cryptographicSignatureVerified = $true
+            tamperRejectionVerified = $true
             releaseConfig = 'runner-local merge of src-tauri/tauri.release.conf.json and TAURI_UPDATER_PUBLIC_KEY'
             published = $false
           } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidenceRoot 'signed-updater-validation.json') -Encoding utf8NoBOM
@@ -113,9 +160,11 @@ jobs:
           | Field | Value |
           | --- | --- |
           | Source | ``${{ github.event.pull_request.head.sha }}`` |
-          | Installer | ``$($installer[0].Name)`` |
+          | Installer | ``$($installer.Name)`` |
           | Installer SHA-256 | ``$installerHash`` |
           | Signature SHA-256 | ``$signatureHash`` |
+          | Cryptographic signature verification | **PASS** |
+          | Tamper rejection | **PASS** |
           | Published | **No** |
           "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
