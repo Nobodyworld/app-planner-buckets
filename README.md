@@ -198,7 +198,7 @@ v2 notes:
 
 The current public stable baseline is `v1.1.0`.
 
-`main` contains the `1.2.0` desktop/updater release candidate, but `v1.2.0` has **not** been tagged or published yet. Release hardening is tracked in issue #92. Creating the tag may only produce a verified **draft** release; publishing that draft requires a separate explicit promotion approval.
+`main` contains the `1.2.0` desktop/updater release candidate, but `v1.2.0` has **not** been tagged or published yet. Release hardening was completed in issue #92 and PR #93. Creating the tag may only produce a verified **draft** release; publishing that draft requires a separate explicit promotion approval.
 
 Because `v1.1.0` predates the updater, it cannot perform an in-app update to `1.2.0`. The first published `1.2.0` establishes the updater trust root. A later updater-enabled release must prove the first production prior-version → update → restart/data-survival path.
 
