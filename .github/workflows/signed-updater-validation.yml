@@ -95,12 +95,19 @@ jobs:
           if ($installer.Count -ne 1) { throw "Expected one NSIS installer; found $($installer.Count)." }
           $signature = "$($installer[0].FullName).sig"
           if (-not (Test-Path -LiteralPath $signature)) { throw 'Signed updater signature is missing.' }
+          $publicKeyPath = Join-Path $env:RUNNER_TEMP 'planner-buckets-updater.pub'
+          try {
+            $publicKeyBytes = [Convert]::FromBase64String($env:PLANNER_BUCKETS_UPDATER_PUBKEY)
+          } catch {
+            throw 'TAURI_UPDATER_PUBLIC_KEY is not valid base64-encoded Minisign public-key content.'
+          }
+          [IO.File]::WriteAllBytes($publicKeyPath, $publicKeyBytes)
           $rlib = @(Get-ChildItem src-tauri/target/release/deps -File -Filter 'libminisign_verify-*.rlib')
           if ($rlib.Count -ne 1) { throw "Expected one minisign-verify rlib; found $($rlib.Count)." }
           $verifier = Join-Path $env:RUNNER_TEMP 'verify-updater-signature.exe'
           rustc scripts/release/verify-updater-signature.rs --edition 2021 --extern "minisign_verify=$($rlib[0].FullName)" -o $verifier
           if ($LASTEXITCODE -ne 0) { throw 'Failed to compile updater signature verifier.' }
-          & $verifier $installer[0].FullName $signature
+          & $verifier $installer[0].FullName $signature $publicKeyPath
           if ($LASTEXITCODE -ne 0) { throw 'Updater signature verification or tamper-rejection proof failed.' }
           "installer=$($installer[0].FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "signature=$signature" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8

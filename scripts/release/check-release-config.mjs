@@ -42,6 +42,7 @@ expectIncludes(release, "$config['plugins'] = @{ updater = @{ pubkey = $env:PLAN
 expectIncludes(release, 'args: --config "${{ steps.signed-config.outputs.path }}"', 'Release workflow');
 expectIncludes(release, 'releaseDraft: true', 'Release workflow');
 expectIncludes(release, "gh release download $env:GITHUB_REF_NAME --pattern $localInstaller.Name --pattern \"$($localInstaller.Name).sig\" --pattern 'latest.json'", 'Release workflow');
+expectIncludes(release, '[Convert]::FromBase64String($env:PLANNER_BUCKETS_UPDATER_PUBKEY)', 'Release workflow');
 expectIncludes(release, 'rustc scripts/release/verify-updater-signature.rs', 'Release workflow');
 expectIncludes(release, 'cryptographicSignatureVerified = $true', 'Release workflow');
 expectIncludes(release, 'tamperRejectionVerified = $true', 'Release workflow');
@@ -57,11 +58,12 @@ expectExcludes(signedValidation, 'feat/signed-desktop-updater', 'Signed updater 
 expectIncludes(signedValidation, "Get-Content 'src-tauri/tauri.release.conf.json' -Raw | ConvertFrom-Json -AsHashtable", 'Signed updater validation');
 expectIncludes(signedValidation, "$config['plugins'] = @{ updater = @{ pubkey = $env:PLANNER_BUCKETS_UPDATER_PUBKEY } }", 'Signed updater validation');
 expectIncludes(signedValidation, 'npm run desktop:build -- --config "$env:SIGNED_TAURI_CONFIG"', 'Signed updater validation');
+expectIncludes(signedValidation, '[Convert]::FromBase64String($env:PLANNER_BUCKETS_UPDATER_PUBKEY)', 'Signed updater validation');
 expectIncludes(signedValidation, 'rustc scripts/release/verify-updater-signature.rs', 'Signed updater validation');
 expectIncludes(signedValidation, 'cryptographicSignatureVerified = $true', 'Signed updater validation');
 expectIncludes(signedValidation, 'tamperRejectionVerified = $true', 'Signed updater validation');
 
-expectIncludes(verifier, 'PublicKey::decode', 'Updater signature verifier');
+expectIncludes(verifier, 'PublicKey::from_file', 'Updater signature verifier');
 expectIncludes(verifier, 'Signature::from_file', 'Updater signature verifier');
 expectIncludes(verifier, '.verify(&bytes, &signature, false)', 'Updater signature verifier');
 expectIncludes(verifier, 'tampered[index] ^= 0x01', 'Updater signature verifier');

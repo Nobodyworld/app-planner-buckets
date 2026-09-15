@@ -156,12 +156,19 @@ jobs:
           $downloadedSignatureText = (Get-Content -LiteralPath $downloadedSignature -Raw).Trim()
           if ($downloadedSignatureText -ne $localSignatureText) { throw 'Downloaded draft signature differs from the locally generated signature.' }
 
+          $publicKeyPath = Join-Path $env:RUNNER_TEMP 'planner-buckets-updater.pub'
+          try {
+            $publicKeyBytes = [Convert]::FromBase64String($env:PLANNER_BUCKETS_UPDATER_PUBKEY)
+          } catch {
+            throw 'TAURI_UPDATER_PUBLIC_KEY is not valid base64-encoded Minisign public-key content.'
+          }
+          [IO.File]::WriteAllBytes($publicKeyPath, $publicKeyBytes)
           $rlib = @(Get-ChildItem src-tauri/target/release/deps -File -Filter 'libminisign_verify-*.rlib')
           if ($rlib.Count -ne 1) { throw "Expected one minisign-verify rlib; found $($rlib.Count)." }
           $verifier = Join-Path $env:RUNNER_TEMP 'verify-updater-signature.exe'
           rustc scripts/release/verify-updater-signature.rs --edition 2021 --extern "minisign_verify=$($rlib[0].FullName)" -o $verifier
           if ($LASTEXITCODE -ne 0) { throw 'Failed to compile updater signature verifier.' }
-          & $verifier $downloadedInstaller $downloadedSignature
+          & $verifier $downloadedInstaller $downloadedSignature $publicKeyPath
           if ($LASTEXITCODE -ne 0) { throw 'Updater signature verification or tamper-rejection proof failed.' }
 
           $latest = Get-Content $latestPath -Raw | ConvertFrom-Json

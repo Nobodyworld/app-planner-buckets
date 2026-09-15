@@ -5,17 +5,18 @@ fn main() {
     let mut args = env::args().skip(1);
     let artifact_path = args
         .next()
-        .expect("usage: verify-updater-signature <artifact> <signature>");
+        .expect("usage: verify-updater-signature <artifact> <signature> <public-key-file>");
     let signature_path = args
         .next()
-        .expect("usage: verify-updater-signature <artifact> <signature>");
+        .expect("usage: verify-updater-signature <artifact> <signature> <public-key-file>");
+    let public_key_path = args
+        .next()
+        .expect("usage: verify-updater-signature <artifact> <signature> <public-key-file>");
     if args.next().is_some() {
-        panic!("usage: verify-updater-signature <artifact> <signature>");
+        panic!("usage: verify-updater-signature <artifact> <signature> <public-key-file>");
     }
 
-    let public_key_text = env::var("PLANNER_BUCKETS_UPDATER_PUBKEY")
-        .expect("PLANNER_BUCKETS_UPDATER_PUBKEY is required");
-    let public_key = PublicKey::decode(public_key_text.trim())
+    let public_key = PublicKey::from_file(Path::new(&public_key_path))
         .expect("unable to decode updater public key");
     let signature = Signature::from_file(Path::new(&signature_path))
         .expect("unable to decode updater signature");
