@@ -43,6 +43,7 @@ expectIncludes(release, 'args: --config "${{ steps.signed-config.outputs.path }}
 expectIncludes(release, 'releaseDraft: true', 'Release workflow');
 expectIncludes(release, "gh release download $env:GITHUB_REF_NAME --pattern $localInstaller.Name --pattern \"$($localInstaller.Name).sig\" --pattern 'latest.json'", 'Release workflow');
 expectIncludes(release, '[Convert]::FromBase64String($env:PLANNER_BUCKETS_UPDATER_PUBKEY)', 'Release workflow');
+expectIncludes(release, '[Convert]::FromBase64String($downloadedSignatureText)', 'Release workflow');
 expectIncludes(release, 'rustc scripts/release/verify-updater-signature.rs', 'Release workflow');
 expectIncludes(release, 'cryptographicSignatureVerified = $true', 'Release workflow');
 expectIncludes(release, 'tamperRejectionVerified = $true', 'Release workflow');
@@ -59,6 +60,7 @@ expectIncludes(signedValidation, "Get-Content 'src-tauri/tauri.release.conf.json
 expectIncludes(signedValidation, "$config['plugins'] = @{ updater = @{ pubkey = $env:PLANNER_BUCKETS_UPDATER_PUBKEY } }", 'Signed updater validation');
 expectIncludes(signedValidation, 'npm run desktop:build -- --config "$env:SIGNED_TAURI_CONFIG"', 'Signed updater validation');
 expectIncludes(signedValidation, '[Convert]::FromBase64String($env:PLANNER_BUCKETS_UPDATER_PUBKEY)', 'Signed updater validation');
+expectIncludes(signedValidation, '[Convert]::FromBase64String((Get-Content -LiteralPath $encodedSignature -Raw).Trim())', 'Signed updater validation');
 expectIncludes(signedValidation, 'rustc scripts/release/verify-updater-signature.rs', 'Signed updater validation');
 expectIncludes(signedValidation, 'cryptographicSignatureVerified = $true', 'Signed updater validation');
 expectIncludes(signedValidation, 'tamperRejectionVerified = $true', 'Signed updater validation');
