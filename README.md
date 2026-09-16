@@ -4,6 +4,12 @@ Local-first planning board for projects, buckets, and tasks.
 
 Planner Buckets supports both a browser application and a Windows desktop application built from the same React/Vite frontend and planner schema. No backend or account is required.
 
+## Repository role
+
+This repository is the public release/source mirror for Planner Buckets. Active feature development occurs privately; accepted release candidates are promoted here for public review, validation, tagging, and distribution.
+
+The public repository intentionally remains available rather than being archived because published desktop builds use its GitHub Releases endpoint for signed updater metadata and artifacts. Day-to-day development branches, experiments, and dependency-update churn do not belong here.
+
 See [Project-native workspace workflows](docs/PROJECT_NATIVE_WORKSPACE.md) for board navigation, Quick Add, explicit selection, copy/export/import, Restore recovery, paste Undo, and the synthetic physical-acceptance checklist.
 
 ## Delivery modes
@@ -196,9 +202,9 @@ v2 notes:
 
 ## Release status
 
-The current public stable baseline is `v1.1.0`.
+The current published stable baseline is `v1.1.0`; `main` contains the final `1.2.0` desktop/updater release candidate.
 
-`main` contains the `1.2.0` desktop/updater release candidate, but `v1.2.0` has **not** been tagged or published yet. Release hardening was completed in issue #92 and PR #93. Creating the tag may only produce a verified **draft** release; publishing that draft requires a separate explicit promotion approval.
+Public feature development is frozen here. `v1.2.0` is the transition point to the public-release-mirror model: ongoing feature development occurs privately, and only accepted public release candidates are promoted back into this repository. Release hardening was completed in issue #92 and PR #93. Creating the `v1.2.0` tag may only produce a verified **draft** release; publishing that draft requires a separate explicit promotion approval.
 
 Because `v1.1.0` predates the updater, it cannot perform an in-app update to `1.2.0`. The first published `1.2.0` establishes the updater trust root. A later updater-enabled release must prove the first production prior-version → update → restart/data-survival path.
 

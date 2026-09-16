@@ -1,8 +1,23 @@
 # Contributing
 
-Thanks for helping improve Planner Buckets.
+Planner Buckets uses this repository as its public release/source mirror. Active feature development occurs in a private development repository and accepted release candidates are promoted here for public validation, tagging, and distribution.
+
+## Public-repository scope
+
+This repository is intentionally not the day-to-day feature-development workspace.
+
+Appropriate public-repository changes are limited to:
+
+- release promotion and release-specific verification;
+- public documentation or metadata corrections;
+- narrowly scoped fixes required for a public release; and
+- security-related maintenance that belongs in the public source history.
+
+Do not open speculative feature branches here merely to continue product development. Security reports should follow [SECURITY.md](SECURITY.md).
 
 ## Development setup
+
+The public source remains buildable and auditable.
 
 1. Install Node.js 20.19 or newer within the Node 20 line, Node.js 22.12 or newer within the Node 22 line, or Node.js 24.x.
 2. Install dependencies:
@@ -28,44 +43,34 @@ npm run desktop:dev
 npm run desktop:build
 ```
 
-The desktop shell currently uses WebView `localStorage`. Export JSON backups during testing; durable desktop persistence and backups belong to #40, and signed updater/release work belongs to #41.
+The installed desktop application uses durable native planner files, backups, recovery, writer exclusion, and the signed updater described in [docs/DESKTOP.md](docs/DESKTOP.md) and [docs/RELEASES.md](docs/RELEASES.md).
 
-## Branch and PR workflow
+## Release validation
 
-1. Create a feature branch from `main`.
-2. Keep commits focused and small.
-3. Run checks before opening a PR:
+Before promoting public source, run the checks appropriate to the changed scope:
 
 ```bash
 npm run verify
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 npm run desktop:build
 ```
 
-4. Open a PR with:
+Release/updater-sensitive changes additionally require the repository's signed-updater validation and release-promotion gates. Do not weaken those gates to simplify promotion from private development.
 
-- What changed
-- Why it changed
-- How to test it
-- Screenshots/GIFs for UI changes
-
-## Coding guidelines
+## Coding and testing guidelines
 
 - Use TypeScript types for new data/state shapes.
-- Prefer small reducer actions with explicit state transitions.
+- Prefer explicit state transitions and deterministic tests.
 - Keep animation/motion timings on shared CSS tokens when possible.
-- Avoid changing unrelated behavior in the same PR.
-
-## Testing guidelines
-
+- Avoid unrelated behavior changes in a public release-promotion PR.
 - Add or update reducer tests for logic changes in `src/state/plannerReducerV2.ts`.
-- For v1 compatibility, migration, or import/export changes, include coverage near the relevant import, persistence, or migration tests.
-- For UI behavior changes, include manual test steps in the PR. Cover affected drag/drop, clipboard, sidepanel, import/export, and responsive states when relevant.
+- For compatibility, migration, persistence, or import/export changes, include coverage near the relevant validators and runtime path.
+- Preserve browser and desktop data compatibility unless an explicitly documented migration is part of the release.
 
 ## Security and privacy
 
-- Do not commit secrets or tokens.
+- Do not commit secrets, signing material, tokens, private planner data, or machine-specific evidence paths.
 - Do not commit local export files (`bsp-planner-*.json`).
 - Follow [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
