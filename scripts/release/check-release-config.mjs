@@ -30,24 +30,35 @@ if (tauri.plugins?.updater?.pubkey !== 'RUNTIME_CONFIGURED_BY_RUST') {
   fail('Base Tauri config must keep the updater bootstrap placeholder; the trusted key is injected by the constrained Rust updater builder.');
 }
 
+const releaseActions = [...release.matchAll(/^\s*uses:\s*([^\s#]+)/gm)].map((match) => match[1]);
+if (releaseActions.length === 0) fail('Release workflow must use pinned GitHub-maintained actions for checkout/setup/artifact retention.');
+for (const action of releaseActions) {
+  if (!action.startsWith('actions/')) {
+    fail(`Release workflow must not depend on third-party GitHub Actions under the repository allowlist: ${action}`);
+  }
+}
+
 expectIncludes(release, 'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1', 'Release workflow');
 expectIncludes(release, 'actions/setup-node@820762786026740c76f36085b0efc47a31fe5020', 'Release workflow');
-expectIncludes(release, 'tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f', 'Release workflow');
-expectIncludes(release, 'softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64', 'Release workflow');
 expectIncludes(release, 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a', 'Release workflow');
+expectExcludes(release, 'tauri-apps/tauri-action@', 'Release workflow');
+expectExcludes(release, 'softprops/action-gh-release@', 'Release workflow');
 expectIncludes(release, 'TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}', 'Release workflow');
 expectIncludes(release, 'PLANNER_BUCKETS_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}', 'Release workflow');
 expectIncludes(release, "Get-Content 'src-tauri/tauri.release.conf.json' -Raw | ConvertFrom-Json -AsHashtable", 'Release workflow');
 expectIncludes(release, "$config['plugins'] = @{ updater = @{ pubkey = $env:PLANNER_BUCKETS_UPDATER_PUBKEY } }", 'Release workflow');
-expectIncludes(release, 'args: --config "${{ steps.signed-config.outputs.path }}"', 'Release workflow');
-expectIncludes(release, 'releaseDraft: true', 'Release workflow');
-expectIncludes(release, "gh release download $env:GITHUB_REF_NAME --pattern $localInstaller.Name --pattern \"$($localInstaller.Name).sig\" --pattern 'latest.json'", 'Release workflow');
+expectIncludes(release, 'npm run desktop:build -- --config "$env:SIGNED_TAURI_CONFIG"', 'Release workflow');
+expectIncludes(release, '[Uri]::EscapeDataString($localInstaller.Name)', 'Release workflow');
+expectIncludes(release, "'windows-x86_64' = [ordered]@{", 'Release workflow');
+expectIncludes(release, '& gh release create $tag --repo $repo --draft', 'Release workflow');
+expectIncludes(release, '& gh release upload $tag $asset --repo $repo --clobber', 'Release workflow');
+expectIncludes(release, "gh release download $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --pattern $localInstaller.Name --pattern \"$($localInstaller.Name).sig\" --pattern 'latest.json'", 'Release workflow');
 expectIncludes(release, '[Convert]::FromBase64String($env:PLANNER_BUCKETS_UPDATER_PUBKEY)', 'Release workflow');
 expectIncludes(release, '[Convert]::FromBase64String($downloadedSignatureText)', 'Release workflow');
 expectIncludes(release, 'rustc scripts/release/verify-updater-signature.rs', 'Release workflow');
 expectIncludes(release, 'cryptographicSignatureVerified = $true', 'Release workflow');
 expectIncludes(release, 'tamperRejectionVerified = $true', 'Release workflow');
-expectIncludes(release, '$expectedPath = "/Nobodyworld/app-planner-buckets/releases/download/$env:GITHUB_REF_NAME/$($localInstaller.Name)"', 'Release workflow');
+expectIncludes(release, '$expectedPath = "/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$($localInstaller.Name)"', 'Release workflow');
 expectIncludes(release, "releaseState = 'draft'", 'Release workflow');
 expectIncludes(release, 'The release remains **draft** after complete asset verification.', 'Release workflow');
 expectExcludes(release, 'gh release edit $env:GITHUB_REF_NAME --draft=false', 'Release workflow');
