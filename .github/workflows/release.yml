@@ -112,17 +112,75 @@ jobs:
           $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configPath -Encoding utf8NoBOM
           "path=$configPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Build signed Tauri release as draft
-        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Planner Buckets ${{ github.ref_name }}
-          releaseDraft: true
-          prerelease: false
-          generateReleaseNotes: true
-          uploadUpdaterJson: true
-          updaterJsonPreferNsis: true
-          args: --config "${{ steps.signed-config.outputs.path }}"
+      - name: Build signed Tauri release artifacts
+        shell: pwsh
+        env:
+          SIGNED_TAURI_CONFIG: ${{ steps.signed-config.outputs.path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm run desktop:build -- --config "$env:SIGNED_TAURI_CONFIG"
+          if ($LASTEXITCODE -ne 0) { throw 'Signed Tauri release build failed.' }
+
+      - name: Create draft release and upload signed assets
+        id: draft-assets
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $version = [string]$package.version
+          $tag = $env:GITHUB_REF_NAME
+          $repo = $env:GITHUB_REPOSITORY
+          $installer = @(Get-ChildItem src-tauri/target/release/bundle/nsis -File -Filter '*-setup.exe')
+          if ($installer.Count -ne 1) { throw "Expected one NSIS installer; found $($installer.Count)." }
+          $localInstaller = $installer[0]
+          $localSignature = "$($localInstaller.FullName).sig"
+          if (-not (Test-Path -LiteralPath $localSignature)) { throw 'Signed updater artifact is missing the NSIS signature.' }
+          $signatureText = (Get-Content -LiteralPath $localSignature -Raw).Trim()
+          if ([string]::IsNullOrWhiteSpace($signatureText)) { throw 'Signed updater signature is empty.' }
+
+          $releaseStage = Join-Path $env:RUNNER_TEMP 'release-stage'
+          New-Item -ItemType Directory -Path $releaseStage -Force | Out-Null
+          $stagedInstaller = Join-Path $releaseStage $localInstaller.Name
+          $stagedSignature = "$stagedInstaller.sig"
+          $latestPath = Join-Path $releaseStage 'latest.json'
+          Copy-Item -LiteralPath $localInstaller.FullName -Destination $stagedInstaller -Force
+          Copy-Item -LiteralPath $localSignature -Destination $stagedSignature -Force
+
+          $escapedInstaller = [Uri]::EscapeDataString($localInstaller.Name)
+          $assetUrl = "https://github.com/$repo/releases/download/$tag/$escapedInstaller"
+          [ordered]@{
+            version = $version
+            notes = "Planner Buckets $tag"
+            pub_date = [DateTimeOffset]::UtcNow.ToString('o')
+            platforms = [ordered]@{
+              'windows-x86_64' = [ordered]@{
+                signature = $signatureText
+                url = $assetUrl
+              }
+            }
+          } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $latestPath -Encoding utf8NoBOM
+
+          $oldPreference = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          $existingJson = & gh release view $tag --repo $repo --json isDraft,tagName 2>$null
+          $viewExit = $LASTEXITCODE
+          $ErrorActionPreference = $oldPreference
+          if ($viewExit -eq 0) {
+            $existing = $existingJson | ConvertFrom-Json
+            if (-not $existing.isDraft -or [string]$existing.tagName -ne $tag) {
+              throw 'An incompatible non-draft or mismatched release already exists for this tag.'
+            }
+          } else {
+            & gh release create $tag --repo $repo --draft --title "Planner Buckets $tag" --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to create GitHub Release draft.' }
+          }
+
+          foreach ($asset in @($stagedInstaller, $stagedSignature, $latestPath)) {
+            & gh release upload $tag $asset --repo $repo --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Failed to upload draft release asset '$asset'." }
+          }
+
+          "release-stage-path=$releaseStage" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Verify signed draft assets and prepare supplemental evidence
         id: release-evidence
@@ -139,7 +197,8 @@ jobs:
 
           $releaseCheck = Join-Path $env:RUNNER_TEMP 'release-check'
           New-Item -ItemType Directory -Path $releaseCheck -Force | Out-Null
-          gh release download $env:GITHUB_REF_NAME --pattern $localInstaller.Name --pattern "$($localInstaller.Name).sig" --pattern 'latest.json' --dir $releaseCheck --clobber
+          gh release download $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --pattern $localInstaller.Name --pattern "$($localInstaller.Name).sig" --pattern 'latest.json' --dir $releaseCheck --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to download draft release assets for verification.' }
 
           $downloadedInstaller = Join-Path $releaseCheck $localInstaller.Name
           $downloadedSignature = "$downloadedInstaller.sig"
@@ -155,6 +214,11 @@ jobs:
           $localSignatureText = (Get-Content -LiteralPath $localSignature -Raw).Trim()
           $downloadedSignatureText = (Get-Content -LiteralPath $downloadedSignature -Raw).Trim()
           if ($downloadedSignatureText -ne $localSignatureText) { throw 'Downloaded draft signature differs from the locally generated signature.' }
+
+          $stagedLatest = Join-Path '${{ steps.draft-assets.outputs.release-stage-path }}' 'latest.json'
+          $stagedLatestHash = (Get-FileHash -LiteralPath $stagedLatest -Algorithm SHA256).Hash.ToLowerInvariant()
+          $downloadedLatestHash = (Get-FileHash -LiteralPath $latestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($downloadedLatestHash -ne $stagedLatestHash) { throw 'Downloaded latest.json differs from the generated release metadata.' }
 
           $publicKeyPath = Join-Path $env:RUNNER_TEMP 'planner-buckets-updater.pub'
           $decodedSignaturePath = Join-Path $env:RUNNER_TEMP 'planner-buckets-updater.minisig'
@@ -185,7 +249,7 @@ jobs:
           $assetUri = [Uri][string]$windows[0].Value.url
           if ($assetUri.Scheme -ne 'https' -or $assetUri.Host -ne 'github.com') { throw 'latest.json contains a non-GitHub HTTPS updater URL.' }
           $decodedPath = [Uri]::UnescapeDataString($assetUri.AbsolutePath)
-          $expectedPath = "/Nobodyworld/app-planner-buckets/releases/download/$env:GITHUB_REF_NAME/$($localInstaller.Name)"
+          $expectedPath = "/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$($localInstaller.Name)"
           if ($decodedPath -ne $expectedPath) {
             throw "latest.json updater URL '$decodedPath' does not match exact tag asset '$expectedPath'."
           }
@@ -241,20 +305,22 @@ jobs:
           | Publication state | **Draft only** |
           "@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
-      - name: Upload web distribution and release provenance to draft
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
-        with:
-          tag_name: ${{ github.ref_name }}
-          draft: true
-          files: |
-            ${{ steps.release-evidence.outputs.supplement-path }}/*
-          fail_on_unmatched_files: true
+      - name: Upload supplemental assets to draft
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assets = @(Get-ChildItem -LiteralPath '${{ steps.release-evidence.outputs.supplement-path }}' -File)
+          if ($assets.Count -lt 2) { throw 'Expected browser archive and release provenance assets.' }
+          foreach ($asset in $assets) {
+            & gh release upload $env:GITHUB_REF_NAME $asset.FullName --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Failed to upload supplemental release asset '$($asset.Name)'." }
+          }
 
       - name: Verify complete draft release and leave unpublished
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $release = gh release view $env:GITHUB_REF_NAME --json isDraft,tagName,assets,url | ConvertFrom-Json
+          $release = gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --json isDraft,tagName,assets,url | ConvertFrom-Json
           if (-not $release.isDraft) { throw 'Release was published before explicit promotion approval.' }
           if ([string]$release.tagName -ne $env:GITHUB_REF_NAME) { throw 'Draft release tag does not match the triggering tag.' }
           $names = @($release.assets | ForEach-Object { [string]$_.name })
