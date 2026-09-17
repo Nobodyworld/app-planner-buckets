@@ -42,7 +42,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 - Advanced Planner Buckets desktop/browser release metadata from 1.1.0 to 1.2.0.
 - Moved maintained CI and release validation to Node 22 while retaining the documented package-compatible Node range.
-- Updated `softprops/action-gh-release` to the full-SHA-pinned 3.0.3 release inside the redesigned release workflow.
+- Kept the release workflow compatible with the repository Actions allowlist by using only GitHub-maintained actions; signed Tauri builds and draft-release operations now use the repository-pinned Tauri CLI and runner-provided GitHub CLI directly.
 - Updated the npm lockfile to a patched Browserslist 4.28.9 graph and retained zero reported npm vulnerabilities in accepted validation.
 - Updated Vitest from 4.1.10 to 4.1.11 before release promotion to pick up the patched mocker/server security behavior without taking the Vitest 5 major upgrade.
 - Documented the canonical installer candidate, signed-update trust boundary, release promotion, rollback, and updater-key handling procedures.
@@ -51,6 +51,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- Fixed the tag-triggered Release workflow startup failure by removing third-party GitHub Actions from the release path instead of weakening the repository action policy.
 - Prevented recovery replacement from deleting its last valid fallback before promotion is verified.
 - Made desktop Saved/error/Retry state reflect acknowledged durable writes rather than optimistic in-memory completion.
 - Hardened Restore cancellation/commit ordering, WebView reload session renewal, queued-close behavior, and stale-write rejection.
