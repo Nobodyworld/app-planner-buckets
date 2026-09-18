@@ -172,10 +172,12 @@ jobs:
             if (-not $existing.isDraft -or [string]$existing.tagName -ne $tag) {
               throw 'An incompatible non-draft or mismatched release already exists for this tag.'
             }
-          } else {
-            & gh release create $tag --repo $repo --draft --title "Planner Buckets $tag" --generate-notes
-            if ($LASTEXITCODE -ne 0) { throw 'Failed to create GitHub Release draft.' }
+            & gh release delete $tag --repo $repo --yes
+            if ($LASTEXITCODE -ne 0) { throw 'Failed to reset the existing draft release before rebuilding the candidate.' }
           }
+
+          & gh release create $tag --repo $repo --draft --verify-tag --title "Planner Buckets $tag" --generate-notes
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to create GitHub Release draft.' }
 
           foreach ($asset in @($stagedInstaller, $stagedSignature, $latestPath)) {
             & gh release upload $tag $asset --repo $repo --clobber
