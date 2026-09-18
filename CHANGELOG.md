@@ -51,6 +51,7 @@ The format is based on Keep a Changelog and this project follows Semantic Versio
 
 ### Fixed
 
+- Fixed draft-release asset verification by staging the signed installer and signature under a deterministic GitHub-safe filename so hosted asset names, updater metadata URLs, and re-download verification stay identical.
 - Fixed the tag-triggered Release workflow startup failure by removing third-party GitHub Actions from the release path instead of weakening the repository action policy.
 - Prevented recovery replacement from deleting its last valid fallback before promotion is verified.
 - Made desktop Saved/error/Retry state reflect acknowledged durable writes rather than optimistic in-memory completion.
