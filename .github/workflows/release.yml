@@ -138,15 +138,17 @@ jobs:
           $signatureText = (Get-Content -LiteralPath $localSignature -Raw).Trim()
           if ([string]::IsNullOrWhiteSpace($signatureText)) { throw 'Signed updater signature is empty.' }
 
+          $releaseInstallerName = "planner-buckets-$version-x64-setup.exe"
+          $releaseSignatureName = "$releaseInstallerName.sig"
           $releaseStage = Join-Path $env:RUNNER_TEMP 'release-stage'
           New-Item -ItemType Directory -Path $releaseStage -Force | Out-Null
-          $stagedInstaller = Join-Path $releaseStage $localInstaller.Name
-          $stagedSignature = "$stagedInstaller.sig"
+          $stagedInstaller = Join-Path $releaseStage $releaseInstallerName
+          $stagedSignature = Join-Path $releaseStage $releaseSignatureName
           $latestPath = Join-Path $releaseStage 'latest.json'
           Copy-Item -LiteralPath $localInstaller.FullName -Destination $stagedInstaller -Force
           Copy-Item -LiteralPath $localSignature -Destination $stagedSignature -Force
 
-          $escapedInstaller = [Uri]::EscapeDataString($localInstaller.Name)
+          $escapedInstaller = [Uri]::EscapeDataString($releaseInstallerName)
           $assetUrl = "https://github.com/$repo/releases/download/$tag/$escapedInstaller"
           [ordered]@{
             version = $version
@@ -194,14 +196,16 @@ jobs:
           $localInstaller = $installer[0]
           $localSignature = "$($localInstaller.FullName).sig"
           if (-not (Test-Path -LiteralPath $localSignature)) { throw 'Signed updater artifact is missing the NSIS signature.' }
+          $releaseInstallerName = "planner-buckets-$version-x64-setup.exe"
+          $releaseSignatureName = "$releaseInstallerName.sig"
 
           $releaseCheck = Join-Path $env:RUNNER_TEMP 'release-check'
           New-Item -ItemType Directory -Path $releaseCheck -Force | Out-Null
-          gh release download $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --pattern $localInstaller.Name --pattern "$($localInstaller.Name).sig" --pattern 'latest.json' --dir $releaseCheck --clobber
+          gh release download $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --pattern $releaseInstallerName --pattern $releaseSignatureName --pattern 'latest.json' --dir $releaseCheck --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Failed to download draft release assets for verification.' }
 
-          $downloadedInstaller = Join-Path $releaseCheck $localInstaller.Name
-          $downloadedSignature = "$downloadedInstaller.sig"
+          $downloadedInstaller = Join-Path $releaseCheck $releaseInstallerName
+          $downloadedSignature = Join-Path $releaseCheck $releaseSignatureName
           $latestPath = Join-Path $releaseCheck 'latest.json'
           foreach ($required in @($downloadedInstaller, $downloadedSignature, $latestPath)) {
             if (-not (Test-Path -LiteralPath $required)) { throw "Draft release asset was not downloaded: $required" }
@@ -249,7 +253,7 @@ jobs:
           $assetUri = [Uri][string]$windows[0].Value.url
           if ($assetUri.Scheme -ne 'https' -or $assetUri.Host -ne 'github.com') { throw 'latest.json contains a non-GitHub HTTPS updater URL.' }
           $decodedPath = [Uri]::UnescapeDataString($assetUri.AbsolutePath)
-          $expectedPath = "/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$($localInstaller.Name)"
+          $expectedPath = "/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$releaseInstallerName"
           if ($decodedPath -ne $expectedPath) {
             throw "latest.json updater URL '$decodedPath' does not match exact tag asset '$expectedPath'."
           }
@@ -271,7 +275,7 @@ jobs:
             sourceSha = $env:GITHUB_SHA
             workflowRunId = $env:GITHUB_RUN_ID
             workflowRunAttempt = $env:GITHUB_RUN_ATTEMPT
-            installerFile = $localInstaller.Name
+            installerFile = $releaseInstallerName
             installerSizeBytes = (Get-Item -LiteralPath $downloadedInstaller).Length
             installerSha256 = $downloadedInstallerHash
             updaterSignatureFile = (Split-Path $downloadedSignature -Leaf)
@@ -296,7 +300,7 @@ jobs:
           | --- | --- |
           | Tag | ``$env:GITHUB_REF_NAME`` |
           | Source | ``$env:GITHUB_SHA`` |
-          | Installer | ``$($localInstaller.Name)`` |
+          | Installer | ``$releaseInstallerName`` |
           | Installer SHA-256 | ``$downloadedInstallerHash`` |
           | Signature SHA-256 | ``$signatureHash`` |
           | Signature verification | **PASS** |
