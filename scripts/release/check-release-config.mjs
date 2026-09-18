@@ -55,7 +55,8 @@ if (release.split(canonicalAssetDeclaration).length - 1 < 2) {
 expectIncludes(release, '$stagedInstaller = Join-Path $releaseStage $releaseInstallerName', 'Release workflow');
 expectIncludes(release, '[Uri]::EscapeDataString($releaseInstallerName)', 'Release workflow');
 expectIncludes(release, "'windows-x86_64' = [ordered]@{", 'Release workflow');
-expectIncludes(release, '& gh release create $tag --repo $repo --draft', 'Release workflow');
+expectIncludes(release, '& gh release delete $tag --repo $repo --yes', 'Release workflow');
+expectIncludes(release, '& gh release create $tag --repo $repo --draft --verify-tag', 'Release workflow');
 expectIncludes(release, '& gh release upload $tag $asset --repo $repo --clobber', 'Release workflow');
 expectIncludes(release, "gh release download $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --pattern $releaseInstallerName --pattern $releaseSignatureName --pattern 'latest.json'", 'Release workflow');
 expectExcludes(release, '--pattern $localInstaller.Name', 'Release workflow');
