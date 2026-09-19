@@ -48,17 +48,25 @@ expectIncludes(release, 'PLANNER_BUCKETS_UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_
 expectIncludes(release, "Get-Content 'src-tauri/tauri.release.conf.json' -Raw | ConvertFrom-Json -AsHashtable", 'Release workflow');
 expectIncludes(release, "$config['plugins'] = @{ updater = @{ pubkey = $env:PLANNER_BUCKETS_UPDATER_PUBKEY } }", 'Release workflow');
 expectIncludes(release, 'npm run desktop:build -- --config "$env:SIGNED_TAURI_CONFIG"', 'Release workflow');
-expectIncludes(release, '[Uri]::EscapeDataString($localInstaller.Name)', 'Release workflow');
+const canonicalAssetDeclaration = '$releaseInstallerName = "planner-buckets-$version-x64-setup.exe"';
+if (release.split(canonicalAssetDeclaration).length - 1 < 2) {
+  fail('Release workflow must derive the canonical GitHub-safe installer asset name in both upload and verification stages.');
+}
+expectIncludes(release, '$stagedInstaller = Join-Path $releaseStage $releaseInstallerName', 'Release workflow');
+expectIncludes(release, '[Uri]::EscapeDataString($releaseInstallerName)', 'Release workflow');
 expectIncludes(release, "'windows-x86_64' = [ordered]@{", 'Release workflow');
-expectIncludes(release, '& gh release create $tag --repo $repo --draft', 'Release workflow');
+expectIncludes(release, '& gh release delete $tag --repo $repo --yes', 'Release workflow');
+expectIncludes(release, '& gh release create $tag --repo $repo --draft --verify-tag', 'Release workflow');
 expectIncludes(release, '& gh release upload $tag $asset --repo $repo --clobber', 'Release workflow');
-expectIncludes(release, "gh release download $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --pattern $localInstaller.Name --pattern \"$($localInstaller.Name).sig\" --pattern 'latest.json'", 'Release workflow');
+expectIncludes(release, "gh release download $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --pattern $releaseInstallerName --pattern $releaseSignatureName --pattern 'latest.json'", 'Release workflow');
+expectExcludes(release, '--pattern $localInstaller.Name', 'Release workflow');
 expectIncludes(release, '[Convert]::FromBase64String($env:PLANNER_BUCKETS_UPDATER_PUBKEY)', 'Release workflow');
 expectIncludes(release, '[Convert]::FromBase64String($downloadedSignatureText)', 'Release workflow');
 expectIncludes(release, 'rustc scripts/release/verify-updater-signature.rs', 'Release workflow');
 expectIncludes(release, 'cryptographicSignatureVerified = $true', 'Release workflow');
 expectIncludes(release, 'tamperRejectionVerified = $true', 'Release workflow');
-expectIncludes(release, '$expectedPath = "/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$($localInstaller.Name)"', 'Release workflow');
+expectIncludes(release, '$expectedPath = "/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$releaseInstallerName"', 'Release workflow');
+expectIncludes(release, 'installerFile = $releaseInstallerName', 'Release workflow');
 expectIncludes(release, "releaseState = 'draft'", 'Release workflow');
 expectIncludes(release, 'The release remains **draft** after complete asset verification.', 'Release workflow');
 expectExcludes(release, 'gh release edit $env:GITHUB_REF_NAME --draft=false', 'Release workflow');
